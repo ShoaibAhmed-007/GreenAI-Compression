@@ -1,0 +1,83 @@
+# ========================
+# Python
+# ========================
+greenai_env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ========================
+# Virtual environments
+# ========================
+venv/
+env/
+.venv/
+.env/
+
+# ========================
+# Model weights (large files)
+# ========================
+models/*.pth
+models/*.pt
+models/*.onnx
+models/*.bin
+models/pretrained_baselines/*.pth
+
+# ========================
+# Dataset files
+# ========================
+backend/data/
+data/
+
+# ========================
+# Node.js / Next.js
+# ========================
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+node_modules/
+
+# ========================
+# IDE / Editor
+# ========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ========================
+# OS files
+# ========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ========================
+# Jupyter Notebook
+# ========================
+.ipynb_checkpoints/
+
+# ========================
+# Logs & misc
+# ========================
+*.log
+emissions/
+.codecarbon.config
+
+
+# ========================
+# Models (ignore everything)
+# ========================
+models/
+
+
+# ========================
+# Results (optional but recommended)
+# ========================
+results/

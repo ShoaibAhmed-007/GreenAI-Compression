@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground: #171717;
+  --background: #f8fafc;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Card styles */
+.card {
+  @apply bg-white rounded-xl shadow-md border border-gray-100 p-6;
+}
+
+.card-hover {
+  @apply card transition-all duration-200 hover:shadow-lg hover:border-green-200;
+}
+
+/* Status badges */
+.badge {
+  @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+}
+
+.badge-green {
+  @apply badge bg-green-100 text-green-800;
+}
+
+.badge-blue {
+  @apply badge bg-blue-100 text-blue-800;
+}
+
+.badge-amber {
+  @apply badge bg-amber-100 text-amber-800;
+}
+
+/* Button styles */
+.btn {
+  @apply inline-flex items-center justify-center px-4 py-2 rounded-lg font-medium
+         transition-all duration-200 text-sm;
+}
+
+.btn-primary {
+  @apply btn bg-green-600 text-white hover:bg-green-700 active:bg-green-800;
+}
+
+.btn-secondary {
+  @apply btn bg-gray-100 text-gray-700 hover:bg-gray-200;
+}
+
+.btn-danger {
+  @apply btn bg-red-50 text-red-600 hover:bg-red-100;
+}
