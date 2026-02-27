@@ -43,6 +43,133 @@ const STRATEGY_LABELS: Record<string, string> = {
 };
 
 export function ModelDashboard({ model, modelKey, compressionResults, onNewResult, onClose }: ModelDashboardProps) {
+      // Ensure baseline is included in results for graph
+      const baselineResult = {
+        strategy: 'baseline',
+        model_name: model.model_name,
+        model_key: modelKey,
+        compression_method: 'baseline',
+        dataset: model.dataset,
+        input_size: model.input_size,
+        baseline_accuracy: model.accuracy || 0,
+        compressed_accuracy: model.accuracy || 0,
+        size_MB: model.size_MB || 0,
+        baseline_size_MB: model.size_MB || 0,
+        size_reduction_percent: 0,
+        latency_ms: model.latency_ms || 0,
+        emissions_kg: 0,
+        flops: 0,
+        flops_M: 0,
+        sparsity_percent: 0,
+        total_params: model.total_params || 0,
+        nonzero_params: model.total_params || 0,
+        pruning_amount: 0,
+        quantization_type: '',
+        pipeline: '',
+        student_params: 0,
+        teacher_params: 0,
+        param_reduction_percent: 0,
+        kd_epochs: 0,
+        fine_tune_epochs: 0,
+      };
+      const resultsWithBaseline = [baselineResult, ...compressionResults];
+    // For compress all methods
+    const [allLoading, setAllLoading] = useState(false);
+    const [allStep, setAllStep] = useState<number>(0);
+    const [allError, setAllError] = useState<string | null>(null);
+    const [allStatus, setAllStatus] = useState<CompressionStatus | null>(null);
+    const [allCurrentMethod, setAllCurrentMethod] = useState<string | null>(null);
+    const [allSuccess, setAllSuccess] = useState(false);
+    // Methods to run for Compress All
+    const ALL_METHODS = ['pruning', 'quantization', 'hybrid', 'kd'];
+
+    // Sequentially compress all methods
+    const handleCompressAll = async () => {
+      setAllLoading(true);
+      setAllStep(0);
+      setAllError(null);
+      setAllStatus(null);
+      setAllCurrentMethod(null);
+      setAllSuccess(false);
+      for (let i = 0; i < ALL_METHODS.length; ++i) {
+        const m = ALL_METHODS[i];
+        setAllStep(i);
+        setAllCurrentMethod(m);
+        setAllStatus(null);
+        try {
+          await compressPreloaded(modelKey, m, dataset, epochs);
+          // Poll for completion of this method
+          await new Promise<void>((resolve, reject) => {
+            let tries = 0;
+            const poll = async () => {
+              try {
+                const s = await getCompressionStatus();
+                setAllStatus(s);
+                if (!s.running) {
+                  if (s.error) {
+                    setAllError(s.error);
+                    setAllLoading(false);
+                    reject(new Error(s.error));
+                    return;
+                  } else if (s.result) {
+                    onNewResult(s.result);
+                    resolve();
+                    return;
+                  }
+                }
+                tries++;
+                // Unlimited timeout: do not stop polling
+                setTimeout(poll, 1500);
+              } catch (e: any) {
+                setAllError(e.message || 'Polling failed');
+                setAllLoading(false);
+                reject(e);
+              }
+            };
+            poll();
+          });
+        } catch (err: any) {
+          setAllError(err.message || 'Compression failed');
+          setAllLoading(false);
+          return;
+        }
+      }
+      setAllLoading(false);
+      setAllSuccess(true);
+      setAllCurrentMethod(null);
+      setTimeout(() => setAllSuccess(false), 3500);
+      // Ensure baseline is included in results for graph
+      const baselineResult = {
+        strategy: 'baseline',
+        model_name: model.model_name,
+        model_key: modelKey,
+        compression_method: 'baseline',
+        dataset: model.dataset,
+        input_size: model.input_size,
+        baseline_accuracy: model.accuracy || 0,
+        compressed_accuracy: model.accuracy || 0,
+        size_MB: model.size_MB || 0,
+        baseline_size_MB: model.size_MB || 0,
+        size_reduction_percent: 0,
+        latency_ms: model.latency_ms || 0,
+        emissions_kg: 0,
+        flops: 0,
+        flops_M: 0,
+        sparsity_percent: 0,
+        total_params: model.total_params || 0,
+        nonzero_params: model.total_params || 0,
+        pruning_amount: 0,
+        quantization_type: '',
+        pipeline: '',
+        student_params: 0,
+        teacher_params: 0,
+        param_reduction_percent: 0,
+        kd_epochs: 0,
+        fine_tune_epochs: 0,
+      };
+
+      const resultsWithBaseline = [baselineResult, ...compressionResults];
+    };
   const [method, setMethod] = useState('pruning');
   const [dataset, setDataset] = useState('CIFAR10');
   const [epochs, setEpochs] = useState(5);
@@ -231,14 +358,93 @@ export function ModelDashboard({ model, modelKey, compressionResults, onNewResul
           </div>
         </div>
 
-        {/* Compress button */}
-        <button
-          onClick={handleCompress}
-          disabled={loading}
-          className={`w-full ${loading ? 'btn-secondary opacity-60 cursor-not-allowed' : 'btn-primary'}`}
-        >
-          {loading ? 'Compressing...' : `Compress with ${METHODS.find(m => m.value === method)?.label}`}
-        </button>
+        {/* Compress buttons */}
+        <div className="flex flex-col gap-2">
+          <button
+            onClick={handleCompress}
+            disabled={loading || allLoading}
+            className={`w-full ${loading || allLoading ? 'btn-secondary opacity-60 cursor-not-allowed' : 'btn-primary'} rounded-full`}
+          >
+            {allLoading && allCurrentMethod
+              ? `Compressing with ${METHODS.find(m => m.value === allCurrentMethod)?.label || allCurrentMethod}`
+              : loading
+                ? 'Compressing...'
+                : `Compress with ${METHODS.find(m => m.value === method)?.label}`}
+          </button>
+          <button
+            onClick={handleCompressAll}
+            disabled={loading || allLoading}
+            className={`w-full ${allLoading || loading ? 'btn-secondary opacity-60 cursor-not-allowed' : 'btn-primary'} rounded-full`}
+          >
+            {allLoading ? (
+              <span className="flex items-center gap-2 justify-center">
+                <span className="animate-spin inline-block w-4 h-4 border-2 border-green-400 border-t-transparent rounded-full"></span>
+                Compress by All Methods
+              </span>
+            ) : 'Compress by All Methods'}
+          </button>
+        </div>
+            {/* Compress All progress */}
+            {allLoading && allCurrentMethod && (
+              <div className="bg-white rounded-lg border border-green-200 p-4 mb-6">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-sm font-medium text-gray-700">Compress All Progress</span>
+                  <span className="text-xs text-green-600 font-mono">
+                    {allStep + 1}/{ALL_METHODS.length}
+                  </span>
+                </div>
+                <div className="mb-2">
+                  <span className="inline-flex items-center gap-2 text-xs font-semibold text-green-700">
+                    <span className="animate-spin inline-block w-4 h-4 border-2 border-green-400 border-t-transparent rounded-full"></span>
+                    {METHODS.find(m => m.value === allCurrentMethod)?.label || allCurrentMethod}
+                  </span>
+                </div>
+                {allStatus && allStatus.steps && allStatus.steps.length > 0 && (
+                  <div className="space-y-2">
+                    {allStatus.steps.map((step, idx) => {
+                      const isDone = idx < allStatus.steps.findIndex(s => s.key === allStatus.step) || allStatus.step === 'complete';
+                      const isActive = idx === allStatus.steps.findIndex(s => s.key === allStatus.step) && allStatus.step !== 'complete';
+                      return (
+                        <div key={step.key} className="flex items-center gap-3">
+                          <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs flex-shrink-0 transition-all duration-300 ${
+                            isDone ? 'bg-green-500 text-white' :
+                            isActive ? 'bg-green-100 border-2 border-green-500 text-green-700' :
+                            'bg-gray-200 text-gray-400'
+                          }`}>
+                            {isDone ? '\u2713' : STEP_ICONS[step.key] || (idx + 1)}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className={`text-sm font-medium truncate ${
+                              isDone ? 'text-green-700' : isActive ? 'text-gray-900' : 'text-gray-400'
+                            }`}>{step.label}</p>
+                            {isActive && allStatus?.detail && (
+                              <p className="text-xs text-green-600 truncate animate-pulse">{allStatus.detail}</p>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Success notification */}
+            {allSuccess && (
+              <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-6 animate-fade-in">
+                <p className="text-green-700 font-semibold flex items-center gap-2">
+                  <span className="inline-block w-5 h-5 text-green-600">✅</span>
+                  All compression methods completed successfully!
+                </p>
+              </div>
+            )}
+
+            {/* Error for Compress All */}
+            {allError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-6">
+                <p className="text-sm text-red-700">{allError}</p>
+              </div>
+            )}
       </div>
 
       {/* Progress Tracker */}
@@ -286,15 +492,15 @@ export function ModelDashboard({ model, modelKey, compressionResults, onNewResul
       )}
 
       {/* Compression Results for this model */}
-      {compressionResults.length > 0 && (
+      {resultsWithBaseline.length > 0 && (
         <div className="bg-white rounded-lg border border-gray-200 p-4">
           <h3 className="text-sm font-semibold text-gray-900 mb-3">
             Compression Results
-            <span className="ml-2 text-gray-400 font-normal">({compressionResults.length})</span>
+            <span className="ml-2 text-gray-400 font-normal">({resultsWithBaseline.length})</span>
           </h3>
 
           <div className="space-y-3">
-            {[...compressionResults].reverse().map((r, i) => {
+            {[...resultsWithBaseline].reverse().map((r, i) => {
               const methodLabel = STRATEGY_LABELS[r.strategy] || r.strategy;
               const accDiff = r.compressed_accuracy - r.baseline_accuracy;
               return (
@@ -304,7 +510,7 @@ export function ModelDashboard({ model, modelKey, compressionResults, onNewResul
           </div>
 
           {/* Comparison summary */}
-          {compressionResults.length >= 2 && (
+          {resultsWithBaseline.length >= 2 && (
             <div className="mt-4 pt-4 border-t border-gray-100">
               <h4 className="text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
                 Method Comparison
@@ -321,7 +527,7 @@ export function ModelDashboard({ model, modelKey, compressionResults, onNewResul
                     </tr>
                   </thead>
                   <tbody>
-                    {[...compressionResults].reverse().map((r, i) => (
+                    {[...resultsWithBaseline].reverse().map((r, i) => (
                       <tr key={i} className="border-b border-gray-50">
                         <td className="py-2 pr-3 font-medium text-gray-900">
                           {STRATEGY_LABELS[r.strategy] || r.strategy}
