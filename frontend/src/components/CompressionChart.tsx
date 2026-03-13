@@ -18,6 +18,12 @@ type ChartView = 'size' | 'accuracy' | 'radar';
 export function CompressionChart({ strategies, modelName }: ChartProps) {
   const [view, setView] = useState<ChartView>('size');
 
+  // Prepare carbon emissions data
+  const carbonData = strategies.map(s => ({
+    name: s.name.replace(/[→·]/g, '').substring(0, 20),
+    'CO₂ (kg)': typeof s.co2_kg === 'number' ? s.co2_kg : 0,
+  }));
+
   const title = modelName
     ? `Compression Analysis — ${modelName}`
     : 'Compression Analysis';
@@ -80,6 +86,7 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
           {[
             { key: 'size' as ChartView, label: 'Size' },
             { key: 'accuracy' as ChartView, label: 'Acc/Lat' },
+            { key: 'carbon' as ChartView, label: 'CO₂ Emissions' },
             { key: 'radar' as ChartView, label: 'Radar' },
           ].map(tab => (
             <button
@@ -118,6 +125,15 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
               <Legend />
               <Bar yAxisId="left" dataKey="Accuracy (%)" fill="#3b82f6" radius={[4, 4, 0, 0]} />
               <Bar yAxisId="right" dataKey="Latency (ms)" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          ) : view === 'carbon' ? (
+            <BarChart data={carbonData} margin={{ top: 5, right: 20, left: 0, bottom: 60 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-35} textAnchor="end" />
+              <YAxis tick={{ fontSize: 11 }} />
+              <Tooltip formatter={(value) => `${value} kg CO₂`} />
+              <Legend />
+              <Bar dataKey="CO₂ (kg)" fill="#6366f1" radius={[4, 4, 0, 0]} />
             </BarChart>
           ) : (
             <RadarChart data={radarData} cx="50%" cy="50%" outerRadius="70%">

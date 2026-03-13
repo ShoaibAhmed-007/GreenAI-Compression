@@ -110,9 +110,33 @@ export default function Home() {
 
   if (!data) return null;
 
-  // --- Chart data: only the currently selected model's results ---
-  const selectedModelResults = selectedModel ? getResultsForModel(selectedModel) : [];
-  const chartStrategies = selectedModelResults.map(dynamicResultToStrategy);
+  // --- Chart data: always include baseline for selected model ---
+  let chartStrategies: Strategy[] = [];
+  if (selectedModel && baselines?.models[selectedModel]) {
+    const baselineModel = baselines.models[selectedModel];
+    const baselineStrategy: Strategy = {
+      key: 'baseline',
+      name: `${baselineModel.model_name} · Baseline`,
+      accuracy: baselineModel.accuracy || 0,
+      size_MB: baselineModel.size_MB || 0,
+      size_reduction: 0,
+      latency_ms: baselineModel.latency_ms || 0,
+      params: baselineModel.total_params || 0,
+      co2_kg: undefined,
+      flops_M: undefined,
+      sparsity_percent: undefined,
+    };
+    const selectedModelResults = getResultsForModel(selectedModel);
+    const resultStrategies = selectedModelResults.map(dynamicResultToStrategy);
+    // Only add baseline if not already present
+    if (!resultStrategies.some(s => s.key === 'baseline')) {
+      chartStrategies = [baselineStrategy, ...resultStrategies];
+    } else {
+      chartStrategies = resultStrategies;
+    }
+  } else {
+    chartStrategies = [];
+  }
 
   // --- Table data: ALL accumulated results across all models ---
   const allStrategies = savedResults.map(dynamicResultToStrategy);
