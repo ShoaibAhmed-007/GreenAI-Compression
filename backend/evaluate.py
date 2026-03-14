@@ -89,11 +89,15 @@ def count_params(model):
 
 
 def detect_input_shape(model):
-    """Detect input shape from the first Conv2d layer of the model."""
+    """Detect input shape from the model.
+    Checks for a stored _input_size attribute (set by get_pretrained_model),
+    otherwise defaults to 32x32 (CIFAR-10 native).
+    """
+    sz = getattr(model, '_input_size', 32)
     for m in model.modules():
         if isinstance(m, nn.Conv2d):
-            return (1, m.in_channels, 32, 32)
-    return (1, 3, 32, 32)
+            return (1, m.in_channels, sz, sz)
+    return (1, 3, sz, sz)
 
 
 def estimate_flops(model, input_shape=None, device='cpu'):
@@ -152,17 +156,23 @@ def evaluate_uploaded_model(model, test_loader, device, model_path=None):
     latency = measure_latency(model, device, input_shape=input_shape)
 
     result = {
+        "model_name": os.path.basename(model_path).replace('.pth', '').replace('.pt', '') if model_path else "uploaded_model",
+        "accuracy": acc.get("top1", 0),
         "accuracy_top1": acc.get("top1", 0),
         "accuracy_top5": acc.get("top5", 0),
+        "parameters": total_params,
         "total_params": total_params,
         "nonzero_params": nonzero_params,
         "sparsity_percent": sparsity,
         "flops": flops,
         "flops_M": round(flops / 1e6, 2),
         "latency_ms": latency,
+        "energy_kwh": 0,
+        "co2_kg": 0,
     }
 
     if model_path and os.path.exists(model_path):
+        result["original_size_MB"] = get_size_mb(model_path)
         result["size_MB"] = get_size_mb(model_path)
 
     return result
@@ -356,8 +366,13 @@ if __name__ == "__main__":
             pca = per_class_accuracy(model, test_loader, eval_device)
 
             result = {
+                "model_name": cfg["name"],
+                "accuracy": acc["top1"],
                 "accuracy_top1": acc["top1"],
                 "accuracy_top5": acc["top5"],
+                "parameters": total_params,
+                "original_size_MB": size_mb,
+                "compressed_size_MB": size_mb,
                 "size_MB": size_mb,
                 "size_reduction_percent": size_reduction,
                 "total_params": total_params,
@@ -367,6 +382,8 @@ if __name__ == "__main__":
                 "flops_M": round(flops / 1e6, 2),
                 "latency_ms": latency,
                 "per_class_accuracy": pca,
+                "energy_kwh": 0,
+                "co2_kg": 0,
             }
             evaluation_report[cfg["key"]] = result
 

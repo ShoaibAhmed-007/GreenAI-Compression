@@ -46,6 +46,7 @@ def track_dynamic_energy(model, test_loader, device, model_name="uploaded_model"
         project_name=f"dynamic_{model_name}",
         output_dir=os.path.join(os.path.dirname(__file__), '..', 'results'),
         country_iso_code="PAK",
+        region="Punjab",
         log_level="error",
     )
 
@@ -79,7 +80,8 @@ def track_inference_energy(model, loader, device, model_name, n_batches=80):
         project_name=f"inference_{model_name}",
         output_dir="../results",
         output_file=f"emissions_inference_{model_name}.csv",
-        country_iso_code="PAK",  # Pakistan — adjust for your location
+        country_iso_code="PAK",
+        region="Punjab",
         log_level="error",
     )
 
@@ -116,6 +118,7 @@ def track_training_energy(model, train_loader, device, model_name,
         output_dir="../results",
         output_file=f"emissions_training_{model_name}.csv",
         country_iso_code="PAK",
+        region="Punjab",
         log_level="error",
     )
 

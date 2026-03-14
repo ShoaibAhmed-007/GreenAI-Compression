@@ -131,34 +131,75 @@ def count_nonzero(model):
     return sum((p != 0).sum().item() for p in model.parameters())
 
 
+def save_sparse_state_dict(model, path):
+    """
+    Save model state dict with sparse tensor optimization.
+    Converts zero-heavy tensors (>50% zeros) to sparse format
+    so pruned models actually shrink on disk.
+    """
+    state = model.state_dict() if isinstance(model, nn.Module) else model
+    sparse_state = {}
+    for key, tensor in state.items():
+        # Convert zero-heavy tensors to sparse format for disk savings
+        if tensor.is_floating_point() and tensor.dim() >= 2:
+            total = tensor.numel()
+            zeros = (tensor == 0).sum().item()
+            if total > 0 and (zeros / total) > 0.5:
+                sparse_state[key] = tensor.to_sparse()
+                continue
+        sparse_state[key] = tensor
+    torch.save(sparse_state, path)
+    return path
+
+
 def save_compressed(model, path):
     """
     Save model state dict.
-    Uses plain torch.save — gzip was removed because Python's single-threaded
-    gzip takes 5-10 min on large models.  The file is a few MB larger but
-    saving finishes in <1 second.
+    Uses sparse tensor format for pruned models (zeros -> sparse)
+    to actually reduce file size on disk.
     """
     state = model.state_dict() if isinstance(model, nn.Module) else model
     # Strip .gz extension if present so we always write a plain file
     if path.endswith('.gz'):
         path = path[:-3]
-    torch.save(state, path)
-    return path   # return actual path (may differ from input)
+
+    # Check if model has significant sparsity — if so, use sparse saving
+    total_elements = 0
+    zero_elements = 0
+    for tensor in state.values():
+        if tensor.is_floating_point() and tensor.dim() >= 2:
+            total_elements += tensor.numel()
+            zero_elements += (tensor == 0).sum().item()
+
+    if total_elements > 0 and (zero_elements / total_elements) > 0.3:
+        # Significant sparsity detected — save sparse
+        return save_sparse_state_dict(model, path)
+    else:
+        # Dense model — plain save
+        torch.save(state, path)
+        return path
 
 
 def load_compressed(path, device='cpu'):
-    """Load a state dict — supports both plain .pth and legacy .pth.gz."""
+    """Load a state dict — supports sparse tensors, plain .pth, and legacy .pth.gz."""
     if path.endswith('.gz') and os.path.exists(path):
         with gzip.open(path, 'rb') as f:
             buffer = io.BytesIO(f.read())
-        return torch.load(buffer, map_location=device)
-    # Plain .pth
-    if not os.path.exists(path) and os.path.exists(path + '.gz'):
+        state = torch.load(buffer, map_location=device)
+    elif not os.path.exists(path) and os.path.exists(path + '.gz'):
         # Legacy fallback
         with gzip.open(path + '.gz', 'rb') as f:
             buffer = io.BytesIO(f.read())
-        return torch.load(buffer, map_location=device)
-    return torch.load(path, map_location=device)
+        state = torch.load(buffer, map_location=device)
+    else:
+        state = torch.load(path, map_location=device)
+
+    # Convert any sparse tensors back to dense for model.load_state_dict()
+    if isinstance(state, dict):
+        for key in state:
+            if isinstance(state[key], torch.Tensor) and state[key].is_sparse:
+                state[key] = state[key].to_dense()
+    return state
 
 
 def distillation_loss(student_out, teacher_out, labels, T=3.0, alpha=0.5):
@@ -568,10 +609,10 @@ def apply_pruning(model, train_loader, test_loader, device,
     for m, _ in params_to_prune:
         prune.remove(m, 'weight')
 
-    # Save compressed
-    _cb("Saving compressed model...")
+    # Save compressed (with sparse tensor optimization)
+    _cb("Saving compressed model (sparse format)...")
     save_path = os.path.join(save_dir, 'pruned_dynamic.pth')
-    save_compressed(model, save_path)
+    save_sparse_state_dict(model, save_path)
 
     pruned_acc = evaluate(model, test_loader, dev=device)
     pruned_size = get_size_mb(save_path)
@@ -579,6 +620,7 @@ def apply_pruning(model, train_loader, test_loader, device,
     nonzero = count_nonzero(model)
     total = count_params(model)
     sparsity = round(100 * (1 - nonzero / total), 2) if total > 0 else 0
+    compression_ratio = round(baseline_size / pruned_size, 2) if pruned_size > 0 else 0
 
     # Clean up temp file
     if os.path.exists(baseline_path):
@@ -588,8 +630,11 @@ def apply_pruning(model, train_loader, test_loader, device,
         "strategy": "pruning",
         "baseline_accuracy": baseline_acc,
         "compressed_accuracy": pruned_acc,
+        "original_size_MB": baseline_size,
+        "compressed_size_MB": pruned_size,
         "size_MB": pruned_size,
         "baseline_size_MB": baseline_size,
+        "compression_ratio": compression_ratio,
         "size_reduction_percent": round(
             100 * (baseline_size - pruned_size) / baseline_size, 2) if baseline_size > 0 else 0,
         "latency_ms": latency,
@@ -641,12 +686,17 @@ def apply_quantization(model, train_loader, test_loader, device,
     if os.path.exists(baseline_path):
         os.remove(baseline_path)
 
+    compression_ratio = round(baseline_size / quant_size, 2) if quant_size > 0 else 0
+
     return {
         "strategy": "quantization",
         "baseline_accuracy": baseline_acc,
         "compressed_accuracy": quant_acc,
+        "original_size_MB": baseline_size,
+        "compressed_size_MB": quant_size,
         "size_MB": quant_size,
         "baseline_size_MB": baseline_size,
+        "compression_ratio": compression_ratio,
         "size_reduction_percent": round(
             100 * (baseline_size - quant_size) / baseline_size, 2) if baseline_size > 0 else 0,
         "latency_ms": latency,
@@ -737,12 +787,17 @@ def apply_hybrid(model, train_loader, test_loader, device,
     if os.path.exists(baseline_path):
         os.remove(baseline_path)
 
+    compression_ratio = round(baseline_size / hybrid_size, 2) if hybrid_size > 0 else 0
+
     return {
         "strategy": "hybrid",
         "baseline_accuracy": baseline_acc,
         "compressed_accuracy": hybrid_acc,
+        "original_size_MB": baseline_size,
+        "compressed_size_MB": hybrid_size,
         "size_MB": hybrid_size,
         "baseline_size_MB": baseline_size,
+        "compression_ratio": compression_ratio,
         "size_reduction_percent": round(
             100 * (baseline_size - hybrid_size) / baseline_size, 2) if baseline_size > 0 else 0,
         "latency_ms": latency,
@@ -839,12 +894,17 @@ def apply_kd(teacher, train_loader, test_loader, device,
     if os.path.exists(teacher_path):
         os.remove(teacher_path)
 
+    compression_ratio = round(teacher_size / student_size, 2) if student_size > 0 else 0
+
     return {
         "strategy": "kd",
         "baseline_accuracy": teacher_acc,
         "compressed_accuracy": student_acc,
+        "original_size_MB": teacher_size,
+        "compressed_size_MB": student_size,
         "size_MB": student_size,
         "baseline_size_MB": teacher_size,
+        "compression_ratio": compression_ratio,
         "size_reduction_percent": round(
             100 * (teacher_size - student_size) / teacher_size, 2) if teacher_size > 0 else 0,
         "latency_ms": latency,
@@ -916,13 +976,14 @@ def compress_dynamic(model_path, strategy, dataset='CIFAR10',
             f"Choose from: pruning, quantization, hybrid, kd"
         )
 
-    # Add energy tracking
+    # Add energy tracking with location-based emissions
     try:
         from codecarbon import OfflineEmissionsTracker
         tracker = OfflineEmissionsTracker(
             project_name=f"compress_{strategy}",
             output_dir=save_dir,
             country_iso_code="PAK",
+            region="Punjab",
             log_level="error",
         )
         tracker.start()
@@ -937,8 +998,12 @@ def compress_dynamic(model_path, strategy, dataset='CIFAR10',
                     break
         emissions = tracker.stop()
         result["emissions_kg"] = round(float(emissions), 8) if emissions else 0
+        result["co2_kg"] = result["emissions_kg"]
+        result["energy_kwh"] = round(result["emissions_kg"] / 1000, 8)
     except Exception:
         result["emissions_kg"] = 0
+        result["co2_kg"] = 0
+        result["energy_kwh"] = 0
 
     # Add FLOPs estimate (use original model — FLOPs don't change with pruning/quantization)
     try:
@@ -1275,6 +1340,7 @@ def run_compression(model_name, method, dataset='CIFAR10',
             project_name=f"compress_{model_key}_{method}",
             output_dir=save_dir,
             country_iso_code="PAK",
+            region="Punjab",
             log_level="error",
         )
         tracker.start()
@@ -1288,8 +1354,12 @@ def run_compression(model_name, method, dataset='CIFAR10',
                     break
         emissions = tracker.stop()
         result["emissions_kg"] = round(float(emissions), 8) if emissions else 0
+        result["co2_kg"] = result["emissions_kg"]
+        result["energy_kwh"] = round(result["emissions_kg"] / 1000, 8)
     except Exception:
         result["emissions_kg"] = 0
+        result["co2_kg"] = 0
+        result["energy_kwh"] = 0
 
     # Step 5: FLOPs estimate
     _cb('evaluating', 'Computing FLOPs and final metrics...')
