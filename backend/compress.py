@@ -28,6 +28,8 @@ import torchvision
 import torchvision.transforms as transforms
 import os
 import json
+import re
+import argparse
 
 # Enable cuDNN auto-tuner for faster convolutions with fixed input sizes
 torch.backends.cudnn.benchmark = True
@@ -131,6 +133,29 @@ def count_nonzero(model):
     return sum((p != 0).sum().item() for p in model.parameters())
 
 
+def _tensor_is_floating_point(tensor: torch.Tensor) -> bool:
+    """Handle PyTorch variants where is_floating_point can be a method or bool property."""
+    attr = getattr(tensor, "is_floating_point", None)
+    if callable(attr):
+        return bool(attr())
+    return bool(attr)
+
+
+def _slugify_name(value):
+    """Normalize a name so it is safe and consistent for filenames."""
+    normalized = re.sub(r'[^a-zA-Z0-9]+', '_', str(value).strip().lower())
+    normalized = normalized.strip('_')
+    return normalized or 'model'
+
+
+def build_compressed_model_path(save_dir, model_name, compression_method):
+    """Create a standardized compressed filename: <model>_<method>.pth."""
+    model_slug = _slugify_name(model_name)
+    method_slug = _slugify_name(compression_method)
+    filename = f"{model_slug}_{method_slug}.pth"
+    return os.path.join(save_dir, filename)
+
+
 def save_sparse_state_dict(model, path):
     """
     Save model state dict with sparse tensor optimization.
@@ -140,8 +165,11 @@ def save_sparse_state_dict(model, path):
     state = model.state_dict() if isinstance(model, nn.Module) else model
     sparse_state = {}
     for key, tensor in state.items():
+        if not isinstance(tensor, torch.Tensor):
+            sparse_state[key] = tensor
+            continue
         # Convert zero-heavy tensors to sparse format for disk savings
-        if tensor.is_floating_point() and tensor.dim() >= 2:
+        if _tensor_is_floating_point(tensor) and tensor.dim() >= 2:
             total = tensor.numel()
             zeros = (tensor == 0).sum().item()
             if total > 0 and (zeros / total) > 0.5:
@@ -167,7 +195,9 @@ def save_compressed(model, path):
     total_elements = 0
     zero_elements = 0
     for tensor in state.values():
-        if tensor.is_floating_point() and tensor.dim() >= 2:
+        if not isinstance(tensor, torch.Tensor):
+            continue
+        if _tensor_is_floating_point(tensor) and tensor.dim() >= 2:
             total_elements += tensor.numel()
             zero_elements += (tensor == 0).sum().item()
 
@@ -240,6 +270,46 @@ def measure_latency(model, input_shape=(1, 3, 32, 32), dev=None, n_runs=100):
         torch.cuda.synchronize()
     elapsed = (time.time() - start) / n_runs * 1000  # ms
     return round(elapsed, 2)
+
+
+def _start_emissions_tracker(project_name, output_dir):
+    """Best-effort CodeCarbon tracker start. Returns tracker or None."""
+    country_iso_code = "PAK"
+    region = "Punjab"
+    try:
+        from codecarbon import OfflineEmissionsTracker
+        print(
+            f"[CodeCarbon] Starting tracker | project={project_name} "
+            f"| country={country_iso_code} | region={region} "
+            f"| output_dir={output_dir}"
+        )
+        tracker = OfflineEmissionsTracker(
+            project_name=project_name,
+            output_dir=output_dir,
+            country_iso_code=country_iso_code,
+            region=region,
+            log_level="error",
+        )
+        tracker.start()
+        print("[CodeCarbon] Tracker started successfully")
+        return tracker
+    except Exception as e:
+        print(f"[CodeCarbon] Tracker not started: {e}")
+        return None
+
+
+def _stop_emissions_tracker(tracker):
+    """Best-effort CodeCarbon tracker stop. Returns (emissions_kg, energy_kwh)."""
+    if tracker is None:
+        return 0.0, 0.0
+    try:
+        emissions = tracker.stop()
+        emissions_kg = round(float(emissions), 8) if emissions else 0.0
+        # Keep parity with existing project approximation.
+        energy_kwh = round(emissions_kg / 1000, 8)
+        return emissions_kg, energy_kwh
+    except Exception:
+        return 0.0, 0.0
 
 
 def _evaluate_with_resize(model, loader, target_size, needs_resize, dev=None):
@@ -556,7 +626,7 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32, pin
 
 def apply_pruning(model, train_loader, test_loader, device,
                   amount=0.7, fine_tune_epochs=5, save_dir='../models/uploads',
-                  progress_cb=None):
+                  progress_cb=None, model_name='model'):
     """
     Apply unstructured pruning to any model.
     Returns dict with metrics: accuracy, size_MB, latency_ms, etc.
@@ -587,7 +657,14 @@ def apply_pruning(model, train_loader, test_loader, device,
 
     # Fine-tune WITH masks active — keeps pruned weights at zero
     max_batches = 50  # cap per epoch for speed
+    training_tracker = None
+    training_emissions_kg = 0.0
+    training_energy_kwh = 0.0
     if fine_tune_epochs > 0:
+        training_tracker = _start_emissions_tracker(
+            project_name=f"train_after_compress_{_slugify_name(model_name)}_pruning",
+            output_dir=save_dir,
+        )
         optimizer = optim.SGD(model.parameters(), lr=0.001,
                               momentum=0.9, weight_decay=5e-4)
         for epoch in range(fine_tune_epochs):
@@ -604,6 +681,7 @@ def apply_pruning(model, train_loader, test_loader, device,
                 if (batch_idx + 1) % 10 == 0:
                     _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — batch {batch_idx+1}/{max_batches}")
             _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — done")
+        training_emissions_kg, training_energy_kwh = _stop_emissions_tracker(training_tracker)
 
     # Remove masks AFTER fine-tuning so zeros are permanent
     for m, _ in params_to_prune:
@@ -611,7 +689,8 @@ def apply_pruning(model, train_loader, test_loader, device,
 
     # Save compressed (with sparse tensor optimization)
     _cb("Saving compressed model (sparse format)...")
-    save_path = os.path.join(save_dir, 'pruned_dynamic.pth')
+    # Keep naming consistent across strategies and model families.
+    save_path = build_compressed_model_path(save_dir, model_name, 'pruned')
     save_sparse_state_dict(model, save_path)
 
     pruned_acc = evaluate(model, test_loader, dev=device)
@@ -643,12 +722,16 @@ def apply_pruning(model, train_loader, test_loader, device,
         "nonzero_params": nonzero,
         "pruning_amount": amount,
         "fine_tune_epochs": fine_tune_epochs,
+        "training_emissions_kg": training_emissions_kg,
+        "training_co2_kg": training_emissions_kg,
+        "training_energy_kwh": training_energy_kwh,
         "saved_path": save_path,
     }
 
 
 def apply_quantization(model, train_loader, test_loader, device,
-                       save_dir='../models/uploads', progress_cb=None):
+                       save_dir='../models/uploads', progress_cb=None,
+                       model_name='model'):
     """
     Apply dynamic INT8 quantization to any model.
     Returns dict with metrics.
@@ -659,6 +742,8 @@ def apply_quantization(model, train_loader, test_loader, device,
     model.eval()
     input_shape = detect_input_shape(model)
     cpu_dev = torch.device('cpu')
+    training_emissions_kg = 0.0
+    training_energy_kwh = 0.0
 
     # Baseline metrics (cap at 50 batches on CPU for speed)
     _cb("Evaluating baseline accuracy...")
@@ -670,16 +755,21 @@ def apply_quantization(model, train_loader, test_loader, device,
     # Apply dynamic quantization (only nn.Linear is supported;
     # nn.Conv2d is silently ignored by PyTorch's quantize_dynamic)
     _cb("Applying dynamic INT8 quantization...")
+    quant_tracker = _start_emissions_tracker(
+        project_name=f"train_after_compress_{_slugify_name(model_name)}_quantization",
+        output_dir=save_dir,
+    )
     quant_model = torch.quantization.quantize_dynamic(
         model, {nn.Linear}, dtype=torch.qint8)
 
     # Save quantized model
     _cb("Saving quantized model...")
-    save_path = os.path.join(save_dir, 'quantized_dynamic.pth')
+    save_path = build_compressed_model_path(save_dir, model_name, 'quantized')
     save_compressed(quant_model, save_path)
 
     _cb("Evaluating compressed model...")
     quant_acc = evaluate(quant_model, test_loader, dev=cpu_dev, max_batches=50)
+    training_emissions_kg, training_energy_kwh = _stop_emissions_tracker(quant_tracker)
     quant_size = get_size_mb(save_path)
     latency = measure_latency(quant_model, input_shape=input_shape, dev=cpu_dev, n_runs=20)
 
@@ -702,13 +792,16 @@ def apply_quantization(model, train_loader, test_loader, device,
         "latency_ms": latency,
         "quantization_type": "dynamic_int8",
         "total_params": count_params(model),
+        "training_emissions_kg": training_emissions_kg,
+        "training_co2_kg": training_emissions_kg,
+        "training_energy_kwh": training_energy_kwh,
         "saved_path": save_path,
     }
 
 
 def apply_hybrid(model, train_loader, test_loader, device,
                  amount=0.5, fine_tune_epochs=5, save_dir='../models/uploads',
-                 progress_cb=None):
+                 progress_cb=None, model_name='model'):
     """
     Apply pruning + quantization (hybrid) to any model.
     Returns dict with metrics.
@@ -739,7 +832,14 @@ def apply_hybrid(model, train_loader, test_loader, device,
 
     # Fine-tune WITH masks active — keeps pruned weights at zero
     max_batches = 50  # cap per epoch for speed
+    training_tracker = None
+    training_emissions_kg = 0.0
+    training_energy_kwh = 0.0
     if fine_tune_epochs > 0:
+        training_tracker = _start_emissions_tracker(
+            project_name=f"train_after_compress_{_slugify_name(model_name)}_hybrid",
+            output_dir=save_dir,
+        )
         optimizer = optim.SGD(model.parameters(), lr=0.001,
                               momentum=0.9, weight_decay=5e-4)
         for epoch in range(fine_tune_epochs):
@@ -756,6 +856,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
                 if (batch_idx + 1) % 10 == 0:
                     _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — batch {batch_idx+1}/{max_batches}")
             _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — done")
+        training_emissions_kg, training_energy_kwh = _stop_emissions_tracker(training_tracker)
 
     # Remove masks AFTER fine-tuning so zeros are permanent
     for m, _ in params_to_prune:
@@ -775,7 +876,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
 
     # Save hybrid model
     _cb("Saving hybrid model...")
-    save_path = os.path.join(save_dir, 'hybrid_dynamic.pth')
+    save_path = build_compressed_model_path(save_dir, model_name, 'hybrid')
     save_compressed(quant_model, save_path)
 
     _cb("Evaluating hybrid model...")
@@ -805,13 +906,16 @@ def apply_hybrid(model, train_loader, test_loader, device,
         "sparsity_percent": round(100 * (1 - nonzero / total), 2) if total > 0 else 0,
         "total_params": total,
         "pipeline": f"Prune {int(amount*100)}% → Fine-tune {fine_tune_epochs}ep → Quantize INT8",
+        "training_emissions_kg": training_emissions_kg,
+        "training_co2_kg": training_emissions_kg,
+        "training_energy_kwh": training_energy_kwh,
         "saved_path": save_path,
     }
 
 
 def apply_kd(teacher, train_loader, test_loader, device,
              num_classes=10, epochs=20, save_dir='../models/uploads',
-             progress_cb=None):
+             progress_cb=None, model_name='model'):
     """
     Apply knowledge distillation: teacher → CompactStudent.
     The teacher is the uploaded model; the student is a lightweight MobileNet-style model.
@@ -835,6 +939,7 @@ def apply_kd(teacher, train_loader, test_loader, device,
     _cb("Creating compact student model...")
     student = CompactStudent(num_classes=num_classes).to(device)
     student_params = count_params(student)
+    save_path = build_compressed_model_path(save_dir, model_name, 'kd')
 
     # CompactStudent is designed for 32×32 inputs. If the teacher/data uses
     # a larger resolution (e.g. 224×224), we resize inputs for the student
@@ -846,7 +951,16 @@ def apply_kd(teacher, train_loader, test_loader, device,
     # KD training
     optimizer = optim.Adam(student.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    best_acc = 0.0
+    best_acc = float('-inf')
+    training_emissions_kg = 0.0
+    training_energy_kwh = 0.0
+    training_tracker = None
+
+    if epochs > 0:
+        training_tracker = _start_emissions_tracker(
+            project_name=f"train_after_compress_{_slugify_name(model_name)}_kd",
+            output_dir=save_dir,
+        )
 
     max_batches = 100  # cap per epoch for speed
     for epoch in range(epochs):
@@ -876,13 +990,17 @@ def apply_kd(teacher, train_loader, test_loader, device,
         # Evaluate student with resized inputs
         acc = _evaluate_with_resize(student, test_loader, student_size_px,
                                      needs_resize, dev=device)
-        if acc > best_acc:
+        if acc >= best_acc:
             best_acc = acc
-            torch.save(student.state_dict(),
-                       os.path.join(save_dir, 'student_dynamic.pth'))
+            torch.save(student.state_dict(), save_path)
+
+    training_emissions_kg, training_energy_kwh = _stop_emissions_tracker(training_tracker)
+
+    # Ensure a checkpoint exists even in degenerate cases.
+    if not os.path.exists(save_path):
+        torch.save(student.state_dict(), save_path)
 
     # Reload best
-    save_path = os.path.join(save_dir, 'student_dynamic.pth')
     student.load_state_dict(torch.load(save_path, map_location=device))
     student_acc = _evaluate_with_resize(student, test_loader, student_size_px,
                                          needs_resize, dev=device)
@@ -913,6 +1031,9 @@ def apply_kd(teacher, train_loader, test_loader, device,
         "param_reduction_percent": round(
             100 * (1 - student_params / teacher_params), 2) if teacher_params > 0 else 0,
         "kd_epochs": epochs,
+        "training_emissions_kg": training_emissions_kg,
+        "training_co2_kg": training_emissions_kg,
+        "training_energy_kwh": training_energy_kwh,
         "saved_path": save_path,
     }
 
@@ -941,6 +1062,7 @@ def compress_dynamic(model_path, strategy, dataset='CIFAR10',
 
     save_dir = os.path.join(os.path.dirname(model_path), 'compressed')
     os.makedirs(save_dir, exist_ok=True)
+    uploaded_model_name = os.path.splitext(os.path.basename(model_path))[0]
 
     # Load model
     model = load_uploaded_model(model_path, device=device,
@@ -958,35 +1080,34 @@ def compress_dynamic(model_path, strategy, dataset='CIFAR10',
     if strategy == 'pruning':
         result = apply_pruning(model, train_loader, test_loader, device,
                                amount=0.7, fine_tune_epochs=fine_tune_epochs,
-                               save_dir=save_dir)
+                               save_dir=save_dir,
+                               model_name=uploaded_model_name)
     elif strategy == 'quantization':
         result = apply_quantization(model, train_loader, test_loader, device,
-                                    save_dir=save_dir)
+                                    save_dir=save_dir,
+                                    model_name=uploaded_model_name)
     elif strategy == 'hybrid':
         result = apply_hybrid(model, train_loader, test_loader, device,
                               amount=0.5, fine_tune_epochs=fine_tune_epochs,
-                              save_dir=save_dir)
+                              save_dir=save_dir,
+                              model_name=uploaded_model_name)
     elif strategy == 'kd':
         result = apply_kd(model, train_loader, test_loader, device,
                           num_classes=num_classes, epochs=fine_tune_epochs * 4,
-                          save_dir=save_dir)
+                          save_dir=save_dir,
+                          model_name=uploaded_model_name)
     else:
         raise ValueError(
             f"Unknown strategy: {strategy}. "
             f"Choose from: pruning, quantization, hybrid, kd"
         )
 
-    # Add energy tracking with location-based emissions
+    # Add post-compression inference emissions tracking
     try:
-        from codecarbon import OfflineEmissionsTracker
-        tracker = OfflineEmissionsTracker(
+        tracker = _start_emissions_tracker(
             project_name=f"compress_{strategy}",
             output_dir=save_dir,
-            country_iso_code="PAK",
-            region="Punjab",
-            log_level="error",
         )
-        tracker.start()
         # Quick inference pass to measure energy using the original model
         model.eval()
         model = model.to(device)
@@ -996,14 +1117,20 @@ def compress_dynamic(model_path, strategy, dataset='CIFAR10',
                 model(inputs)
                 if i >= 20:
                     break
-        emissions = tracker.stop()
-        result["emissions_kg"] = round(float(emissions), 8) if emissions else 0
-        result["co2_kg"] = result["emissions_kg"]
-        result["energy_kwh"] = round(result["emissions_kg"] / 1000, 8)
+        inference_emissions_kg, inference_energy_kwh = _stop_emissions_tracker(tracker)
+        result["emissions_kg"] = inference_emissions_kg
+        result["co2_kg"] = inference_emissions_kg
+        result["energy_kwh"] = inference_energy_kwh
+        result["inference_emissions_kg"] = inference_emissions_kg
+        result["inference_co2_kg"] = inference_emissions_kg
+        result["inference_energy_kwh"] = inference_energy_kwh
     except Exception:
         result["emissions_kg"] = 0
         result["co2_kg"] = 0
         result["energy_kwh"] = 0
+        result["inference_emissions_kg"] = 0
+        result["inference_co2_kg"] = 0
+        result["inference_energy_kwh"] = 0
 
     # Add FLOPs estimate (use original model — FLOPs don't change with pruning/quantization)
     try:
@@ -1306,19 +1433,23 @@ def run_compression(model_name, method, dataset='CIFAR10',
     if method == 'pruning':
         result = apply_pruning(model, train_loader, test_loader, device,
                                amount=0.7, fine_tune_epochs=fine_tune_epochs,
-                               save_dir=save_dir, progress_cb=compress_cb)
+                               save_dir=save_dir, progress_cb=compress_cb,
+                               model_name=model_key)
     elif method == 'quantization':
         result = apply_quantization(model, train_loader, test_loader, device,
-                                    save_dir=save_dir, progress_cb=compress_cb)
+                                    save_dir=save_dir, progress_cb=compress_cb,
+                                    model_name=model_key)
     elif method == 'hybrid':
         result = apply_hybrid(model, train_loader, test_loader, device,
                               amount=0.5, fine_tune_epochs=fine_tune_epochs,
-                              save_dir=save_dir, progress_cb=compress_cb)
+                              save_dir=save_dir, progress_cb=compress_cb,
+                              model_name=model_key)
     elif method == 'kd':
         result = apply_kd(model, train_loader, test_loader, device,
                           num_classes=num_classes,
                           epochs=fine_tune_epochs,
-                          save_dir=save_dir, progress_cb=compress_cb)
+                          save_dir=save_dir, progress_cb=compress_cb,
+                          model_name=model_key)
     else:
         raise ValueError(
             f"Unknown method: {method}. "
@@ -1332,18 +1463,13 @@ def run_compression(model_name, method, dataset='CIFAR10',
     result['dataset'] = dataset
     result['input_size'] = input_size
 
-    # Step 4: Energy tracking
+    # Step 4: Post-compression inference emissions tracking
     _cb('energy_tracking', 'Measuring energy consumption...')
     try:
-        from codecarbon import OfflineEmissionsTracker
-        tracker = OfflineEmissionsTracker(
+        tracker = _start_emissions_tracker(
             project_name=f"compress_{model_key}_{method}",
             output_dir=save_dir,
-            country_iso_code="PAK",
-            region="Punjab",
-            log_level="error",
         )
-        tracker.start()
         model.eval()
         model = model.to(device)
         with torch.no_grad():
@@ -1352,14 +1478,20 @@ def run_compression(model_name, method, dataset='CIFAR10',
                 model(inputs)
                 if i >= 20:
                     break
-        emissions = tracker.stop()
-        result["emissions_kg"] = round(float(emissions), 8) if emissions else 0
-        result["co2_kg"] = result["emissions_kg"]
-        result["energy_kwh"] = round(result["emissions_kg"] / 1000, 8)
+        inference_emissions_kg, inference_energy_kwh = _stop_emissions_tracker(tracker)
+        result["emissions_kg"] = inference_emissions_kg
+        result["co2_kg"] = inference_emissions_kg
+        result["energy_kwh"] = inference_energy_kwh
+        result["inference_emissions_kg"] = inference_emissions_kg
+        result["inference_co2_kg"] = inference_emissions_kg
+        result["inference_energy_kwh"] = inference_energy_kwh
     except Exception:
         result["emissions_kg"] = 0
         result["co2_kg"] = 0
         result["energy_kwh"] = 0
+        result["inference_emissions_kg"] = 0
+        result["inference_co2_kg"] = 0
+        result["inference_energy_kwh"] = 0
 
     # Step 5: FLOPs estimate
     _cb('evaluating', 'Computing FLOPs and final metrics...')
@@ -1385,11 +1517,72 @@ def run_compression(model_name, method, dataset='CIFAR10',
 # ============================================================
 if __name__ == "__main__":
 
+    parser = argparse.ArgumentParser(
+        description="Run GreenAI compression from CLI"
+    )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default=None,
+        help="Preloaded model key (e.g. resnet18, densenet121)."
+    )
+    parser.add_argument(
+        "--method",
+        type=str,
+        default="pruning",
+        choices=["pruning", "quantization", "hybrid", "kd"],
+        help="Compression method for CLI preloaded run."
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="CIFAR10",
+        choices=["CIFAR10", "CIFAR100"],
+        help="Dataset used for evaluate/fine-tune."
+    )
+    parser.add_argument(
+        "--fine_tune_epochs",
+        type=int,
+        default=5,
+        help="Fine-tuning epochs for pruning/hybrid or KD epochs."
+    )
+    parser.add_argument(
+        "--run_legacy_full_pipeline",
+        action="store_true",
+        help="Run the original full 5-strategy legacy script block."
+    )
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     os.makedirs("../models", exist_ok=True)
     os.makedirs("../results", exist_ok=True)
+
+    # Preferred CLI mode: run one selected preloaded model compression.
+    if args.model_name and not args.run_legacy_full_pipeline:
+        result = run_compression(
+            model_name=args.model_name,
+            method=args.method,
+            dataset=args.dataset,
+            fine_tune_epochs=args.fine_tune_epochs,
+            device=device,
+        )
+        print("\nCLI compression result:")
+        print(json.dumps(result, indent=2))
+        raise SystemExit(0)
+
+    model_name = args.model_name or "resnet18"
+    model_slug = _slugify_name(model_name)
+    model_dir = "../models"
+    baseline_model_path = os.path.join(model_dir, "baseline_model.pth")
+    pruned_sparse_path = build_compressed_model_path(model_dir, model_slug, "pruned_sparse")
+    pruned_dense_path = build_compressed_model_path(model_dir, model_slug, "pruned")
+    quantized_model_path = build_compressed_model_path(model_dir, model_slug, "quantized")
+    student_model_path = build_compressed_model_path(model_dir, model_slug, "student_distilled")
+    hybrid_model_path = build_compressed_model_path(model_dir, model_slug, "hybrid")
+    ultra_sparse_path = build_compressed_model_path(model_dir, model_slug, "ultra_compact_sparse")
+    ultra_quant_path = build_compressed_model_path(model_dir, model_slug, "ultra_compact_quant")
 
     # ----------------------------------------------------------
     # Data loaders (CIFAR-10)
@@ -1426,12 +1619,12 @@ if __name__ == "__main__":
 
     baseline_model = resnet18(weights=None, num_classes=10)
     baseline_model.load_state_dict(
-        torch.load("../models/baseline_model.pth", map_location=device))
+        torch.load(baseline_model_path, map_location=device))
     baseline_model = baseline_model.to(device)
     baseline_model.eval()
 
     baseline_acc = evaluate(baseline_model, test_loader)
-    baseline_size = get_size_mb("../models/baseline_model.pth")
+    baseline_size = get_size_mb(baseline_model_path)
     baseline_params = count_params(baseline_model)
     baseline_latency = measure_latency(baseline_model, dev=device)
     print(f"  Accuracy : {baseline_acc}%")
@@ -1462,7 +1655,7 @@ if __name__ == "__main__":
 
     pruned_model = resnet18(weights=None, num_classes=10)
     pruned_model.load_state_dict(
-        torch.load("../models/baseline_model.pth", map_location=device))
+        torch.load(baseline_model_path, map_location=device))
     pruned_model = pruned_model.to(device)
 
     # Global unstructured L1 pruning — removes 70% of smallest weights
@@ -1493,14 +1686,14 @@ if __name__ == "__main__":
         print(f"    Epoch {epoch}: loss={running_loss/len(train_loader):.4f}, "
               f"acc={acc}%")
 
-    # Save with gzip compression (zeros compress extremely well)
-    save_compressed(pruned_model, "../models/pruned_model_compressed.pth.gz")
+    # Save compressed output as .pth (save_compressed handles sparse tensors).
+    save_compressed(pruned_model, pruned_sparse_path)
     # Also save standard format for comparison
-    torch.save(pruned_model.state_dict(), "../models/pruned_model.pth")
+    torch.save(pruned_model.state_dict(), pruned_dense_path)
 
     pruned_acc = evaluate(pruned_model, test_loader)
-    pruned_size_std = get_size_mb("../models/pruned_model.pth")
-    pruned_size_compressed = get_size_mb("../models/pruned_model_compressed.pth.gz")
+    pruned_size_std = get_size_mb(pruned_dense_path)
+    pruned_size_compressed = get_size_mb(pruned_sparse_path)
     pruned_nonzero = count_nonzero(pruned_model)
     pruned_latency = measure_latency(pruned_model, dev=device)
     sparsity = round(100 * (1 - pruned_nonzero / baseline_params), 2)
@@ -1551,7 +1744,7 @@ if __name__ == "__main__":
         # Load baseline weights; strict=False because quantizable model has
         # extra modules (quant/dequant stubs, FloatFunctional) with no weights
         baseline_state = torch.load(
-            "../models/baseline_model.pth", map_location='cpu')
+            baseline_model_path, map_location='cpu')
         quant_model.load_state_dict(baseline_state, strict=False)
         quant_model.eval()
         quant_model.cpu()
@@ -1579,10 +1772,10 @@ if __name__ == "__main__":
         torch.quantization.convert(quant_model, inplace=True)
 
         # Save quantized model
-        torch.save(quant_model.state_dict(), "../models/quantized_model.pth")
+        torch.save(quant_model.state_dict(), quantized_model_path)
 
         quant_acc = evaluate(quant_model, test_loader, dev=torch.device('cpu'))
-        quant_size = get_size_mb("../models/quantized_model.pth")
+        quant_size = get_size_mb(quantized_model_path)
         quant_latency = measure_latency(
             quant_model, dev=torch.device('cpu'))
 
@@ -1612,18 +1805,17 @@ if __name__ == "__main__":
 
         quant_model_dyn = resnet18(weights=None, num_classes=10)
         quant_model_dyn.load_state_dict(
-            torch.load("../models/baseline_model.pth", map_location='cpu'))
+            torch.load(baseline_model_path, map_location='cpu'))
         quant_model_dyn.eval()
 
         quant_model_dyn = torch.quantization.quantize_dynamic(
             quant_model_dyn, {nn.Linear}, dtype=torch.qint8)
 
-        torch.save(quant_model_dyn.state_dict(),
-                   "../models/quantized_model.pth")
+        torch.save(quant_model_dyn.state_dict(), quantized_model_path)
 
         quant_acc = evaluate(quant_model_dyn, test_loader,
                              dev=torch.device('cpu'))
-        quant_size = get_size_mb("../models/quantized_model.pth")
+        quant_size = get_size_mb(quantized_model_path)
         quant_latency = measure_latency(
             quant_model_dyn, dev=torch.device('cpu'))
 
@@ -1687,16 +1879,16 @@ if __name__ == "__main__":
         acc = evaluate(student, test_loader)
         if acc > best_student_acc:
             best_student_acc = acc
-            torch.save(student.state_dict(), "../models/student_distilled.pth")
+            torch.save(student.state_dict(), student_model_path)
         if epoch % 5 == 0:
             print(f"    Epoch {epoch}: loss={running_loss/len(train_loader):.4f}, "
                   f"acc={acc}%, best={best_student_acc}%")
 
     # Reload best checkpoint
     student.load_state_dict(
-        torch.load("../models/student_distilled.pth", map_location=device))
+        torch.load(student_model_path, map_location=device))
     student_acc = evaluate(student, test_loader)
-    student_size = get_size_mb("../models/student_distilled.pth")
+    student_size = get_size_mb(student_model_path)
     student_latency = measure_latency(student, dev=device)
 
     student_metrics = {
@@ -1737,15 +1929,15 @@ if __name__ == "__main__":
 
     hybrid_student = CompactStudent(num_classes=10)
     hybrid_student.load_state_dict(
-        torch.load("../models/student_distilled.pth", map_location='cpu'))
+        torch.load(student_model_path, map_location='cpu'))
     hybrid_student.eval()
 
     hybrid_student = torch.quantization.quantize_dynamic(
         hybrid_student, {nn.Linear, nn.Conv2d}, dtype=torch.qint8)
 
-    torch.save(hybrid_student.state_dict(), "../models/hybrid_model.pth")
+    torch.save(hybrid_student.state_dict(), hybrid_model_path)
     hybrid_acc = evaluate(hybrid_student, test_loader, dev=torch.device('cpu'))
-    hybrid_size = get_size_mb("../models/hybrid_model.pth")
+    hybrid_size = get_size_mb(hybrid_model_path)
     hybrid_latency = measure_latency(
         hybrid_student, dev=torch.device('cpu'))
 
@@ -1779,7 +1971,7 @@ if __name__ == "__main__":
 
     ultra_model = CompactStudent(num_classes=10).to(device)
     ultra_model.load_state_dict(
-        torch.load("../models/student_distilled.pth", map_location=device))
+        torch.load(student_model_path, map_location=device))
 
     # Prune 50% of compact student's weights
     ultra_prune_params = [
@@ -1828,18 +2020,17 @@ if __name__ == "__main__":
     ultra_model = ultra_model.cpu()
     ultra_model.eval()
 
-    # Save pruned student with gzip compression
-    save_compressed(ultra_model, "../models/ultra_compact_compressed.pth.gz")
+    # Save pruned student as .pth for consistent artifact naming.
+    save_compressed(ultra_model, ultra_sparse_path)
 
     # Also apply dynamic quantization and save sparse
     ultra_quant = torch.quantization.quantize_dynamic(
         copy.deepcopy(ultra_model), {nn.Linear, nn.Conv2d}, dtype=torch.qint8)
-    torch.save(ultra_quant.state_dict(),
-               "../models/ultra_compact_quant.pth")
+    torch.save(ultra_quant.state_dict(), ultra_quant_path)
 
     ultra_acc = evaluate(ultra_model, test_loader, dev=torch.device('cpu'))
-    ultra_size_compressed = get_size_mb("../models/ultra_compact_compressed.pth.gz")
-    ultra_size_quant = get_size_mb("../models/ultra_compact_quant.pth")
+    ultra_size_compressed = get_size_mb(ultra_sparse_path)
+    ultra_size_quant = get_size_mb(ultra_quant_path)
     ultra_nonzero = count_nonzero(ultra_model)
     ultra_latency = measure_latency(ultra_model, dev=torch.device('cpu'))
     ultra_sparsity = round(

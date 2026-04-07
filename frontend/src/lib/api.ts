@@ -112,6 +112,13 @@ export interface DynamicResult {
   size_reduction_percent: number;
   latency_ms: number;
   emissions_kg: number;
+  energy_kwh?: number;
+  training_emissions_kg?: number;
+  training_co2_kg?: number;
+  training_energy_kwh?: number;
+  inference_emissions_kg?: number;
+  inference_co2_kg?: number;
+  inference_energy_kwh?: number;
   flops?: number;
   flops_M?: number;
   sparsity_percent?: number;
@@ -136,6 +143,10 @@ export interface Strategy {
   latency_ms: number;
   params: number;
   inference_energy_kWh?: number;
+  training_energy_kwh?: number;
+  inference_energy_kwh?: number;
+  training_co2_kg?: number;
+  inference_co2_kg?: number;
   co2_kg?: number;
   accuracy_top5?: number;
   flops_M?: number;
@@ -253,6 +264,10 @@ export function clearSavedResults(): void {
 export function dynamicResultToStrategy(r: DynamicResult): Strategy {
   const modelLabel = r.model_name || r.model_key || 'Custom';
   const methodLabel = r.compression_method || r.strategy || '';
+  const trainingCo2 = r.training_co2_kg ?? r.training_emissions_kg;
+  const inferenceCo2 = r.inference_co2_kg ?? r.inference_emissions_kg ?? r.emissions_kg;
+  const trainingEnergy = r.training_energy_kwh;
+  const inferenceEnergy = r.inference_energy_kwh ?? r.energy_kwh;
   return {
     key: `dyn_${(r.model_key || r.model_name || 'x').replace(/\s/g, '_')}_${r.strategy}`,
     name: `${modelLabel} · ${methodLabel.charAt(0).toUpperCase() + methodLabel.slice(1)}`,
@@ -261,7 +276,12 @@ export function dynamicResultToStrategy(r: DynamicResult): Strategy {
     size_reduction: r.size_reduction_percent,
     latency_ms: r.latency_ms,
     params: r.total_params || r.nonzero_params || 0,
-    co2_kg: r.emissions_kg,
+    co2_kg: inferenceCo2,
+    training_co2_kg: trainingCo2,
+    inference_co2_kg: inferenceCo2,
+    training_energy_kwh: trainingEnergy,
+    inference_energy_kwh: inferenceEnergy,
+    inference_energy_kWh: inferenceEnergy,
     flops_M: r.flops_M,
     sparsity_percent: r.sparsity_percent,
   };
