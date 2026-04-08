@@ -38,6 +38,8 @@ export function ComparisonTable({ strategies }: ComparisonTableProps) {
               <th className="text-right py-3 px-4 font-medium text-gray-600">Size</th>
               <th className="text-right py-3 px-4 font-medium text-gray-600">↓ Size</th>
               <th className="text-right py-3 px-4 font-medium text-gray-600">Latency</th>
+              <th className="text-right py-3 px-4 font-medium text-gray-600">Train CO₂</th>
+              <th className="text-right py-3 px-4 font-medium text-gray-600">Infer CO₂</th>
             </tr>
           </thead>
           <tbody>
@@ -84,6 +86,16 @@ export function ComparisonTable({ strategies }: ComparisonTableProps) {
                   </td>
                   <td className="py-3 px-4 text-right font-mono text-gray-700">
                     {s.latency_ms} ms
+                  </td>
+                  <td className="py-3 px-4 text-right font-mono text-gray-700">
+                    {s.training_co2_kg != null ? `${s.training_co2_kg.toFixed(6)} kg` : '—'}
+                  </td>
+                  <td className="py-3 px-4 text-right font-mono text-gray-700">
+                    {s.inference_co2_kg != null
+                      ? `${s.inference_co2_kg.toFixed(6)} kg`
+                      : s.co2_kg != null
+                        ? `${s.co2_kg.toFixed(6)} kg`
+                        : '—'}
                   </td>
                 </tr>
               );

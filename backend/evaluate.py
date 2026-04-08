@@ -28,7 +28,12 @@ import io
 
 # Add parent dir so we can import CompactStudent from compress.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compress import CompactStudent, load_compressed
+from compress import (
+    CompactStudent,
+    load_compressed,
+    _extract_logits,
+    _configure_quantized_backend,
+)
 
 # CIFAR-10 class names
 CIFAR10_CLASSES = [
@@ -47,7 +52,7 @@ def evaluate_accuracy(model, loader, device, topk=(1, 5)):
     with torch.no_grad():
         for inputs, labels in loader:
             inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
+            outputs = _extract_logits(model(inputs))
             _, pred = outputs.topk(maxk, dim=1, largest=True, sorted=True)
             pred = pred.t()
             correct_mask = pred.eq(labels.view(1, -1).expand_as(pred))
@@ -67,7 +72,7 @@ def per_class_accuracy(model, loader, device, num_classes=10):
     with torch.no_grad():
         for inputs, labels in loader:
             inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
+            outputs = _extract_logits(model(inputs))
             _, predicted = outputs.max(1)
             for i in range(labels.size(0)):
                 label = labels[i].item()
@@ -223,9 +228,8 @@ def load_model(arch, path, device):
         model = qresnet18(weights=None, num_classes=10, quantize=False)
         model.eval()
         model.fuse_model()
-        backend = 'fbgemm'
+        backend = _configure_quantized_backend()
         model.qconfig = torch.quantization.get_default_qconfig(backend)
-        torch.backends.quantized.engine = backend
         torch.quantization.prepare(model, inplace=True)
         torch.quantization.convert(model, inplace=True)
         model.load_state_dict(torch.load(path, map_location='cpu'))

@@ -30,7 +30,14 @@ import time
 from codecarbon import OfflineEmissionsTracker
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compress import CompactStudent, evaluate, distillation_loss, load_compressed
+from compress import (
+    CompactStudent,
+    evaluate,
+    distillation_loss,
+    load_compressed,
+    _extract_logits,
+    _configure_quantized_backend,
+)
 
 
 def track_dynamic_energy(model, test_loader, device, model_name="uploaded_model",
@@ -54,7 +61,7 @@ def track_dynamic_energy(model, test_loader, device, model_name="uploaded_model"
     with torch.no_grad():
         for i, (inputs, labels) in enumerate(test_loader):
             inputs = inputs.to(device)
-            _ = model(inputs)
+            _ = _extract_logits(model(inputs))
             if i >= n_batches - 1:
                 break
     emissions = tracker.stop()
@@ -89,7 +96,7 @@ def track_inference_energy(model, loader, device, model_name, n_batches=80):
     with torch.no_grad():
         for i, (inputs, labels) in enumerate(loader):
             inputs = inputs.to(device)
-            _ = model(inputs)
+            _ = _extract_logits(model(inputs))
             if i >= n_batches - 1:
                 break
     emissions = tracker.stop()
@@ -129,11 +136,11 @@ def track_training_energy(model, train_loader, device, model_name,
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
 
-            outputs = model(inputs)
+            outputs = _extract_logits(model(inputs))
             if teacher is not None:
                 teacher.eval()
                 with torch.no_grad():
-                    t_out = teacher(inputs)
+                    t_out = _extract_logits(teacher(inputs))
                 loss = distillation_loss(outputs, t_out, labels, T=4.0, alpha=0.3)
             else:
                 loss = F.cross_entropy(outputs, labels)
@@ -232,8 +239,8 @@ if __name__ == "__main__":
             m = qresnet18(weights=None, num_classes=10, quantize=False)
             m.eval()
             m.fuse_model()
-            m.qconfig = torch.quantization.get_default_qconfig('fbgemm')
-            torch.backends.quantized.engine = 'fbgemm'
+            backend = _configure_quantized_backend()
+            m.qconfig = torch.quantization.get_default_qconfig(backend)
             torch.quantization.prepare(m, inplace=True)
             torch.quantization.convert(m, inplace=True)
             m.load_state_dict(torch.load("../models/quantized_model.pth",

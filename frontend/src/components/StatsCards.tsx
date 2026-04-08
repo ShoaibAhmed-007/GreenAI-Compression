@@ -5,12 +5,22 @@ import { Strategy } from '@/lib/api';
 interface StatsCardsProps {
   baseline?: Strategy;
   bestStrategy?: Strategy;
+  smallestModelName?: string;
+  smallestModelSizeMB?: number;
   gpuAvailable: boolean;
   totalModels: number;
   dynamicCount?: number;
 }
 
-export function StatsCards({ baseline, bestStrategy, gpuAvailable, totalModels, dynamicCount = 0 }: StatsCardsProps) {
+export function StatsCards({
+  baseline,
+  bestStrategy,
+  smallestModelName,
+  smallestModelSizeMB,
+  gpuAvailable,
+  totalModels,
+  dynamicCount = 0,
+}: StatsCardsProps) {
   const stats = [
     {
       label: 'Baseline Accuracy',
@@ -28,8 +38,8 @@ export function StatsCards({ baseline, bestStrategy, gpuAvailable, totalModels, 
     },
     {
       label: 'Smallest Model',
-      value: bestStrategy ? `${bestStrategy.size_MB} MB` : '—',
-      sub: baseline ? `vs ${baseline.size_MB} MB baseline` : '',
+      value: smallestModelSizeMB != null ? `${smallestModelSizeMB} MB` : '—',
+      sub: smallestModelName || 'No ready baseline models',
       color: 'text-purple-600',
       bg: 'bg-purple-50',
     },

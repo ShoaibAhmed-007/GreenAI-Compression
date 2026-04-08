@@ -47,6 +47,8 @@ export function DynamicResults({ results, onClear }: DynamicResultsProps) {
           const accDiff = result.compressed_accuracy - result.baseline_accuracy;
           const modelLabel = result.model_name || result.model_key || 'Model';
           const methodLabel = STRATEGY_LABELS[result.strategy] || result.strategy;
+          const trainingCo2 = result.training_co2_kg ?? result.training_emissions_kg;
+          const inferenceCo2 = result.inference_co2_kg ?? result.inference_emissions_kg ?? result.emissions_kg;
 
           return (
             <div key={idx} className="border border-gray-200 rounded-lg overflow-hidden">
@@ -139,8 +141,20 @@ export function DynamicResults({ results, onClear }: DynamicResultsProps) {
                       {result.flops_M != null && result.flops_M > 0 && (
                         <DetailRow label="FLOPs" value={`${result.flops_M} M`} />
                       )}
-                      {result.emissions_kg != null && (
-                        <DetailRow label="CO₂" value={`${result.emissions_kg.toFixed(6)} kg`} />
+                      {trainingCo2 != null && (
+                        <DetailRow label="Train CO₂" value={`${trainingCo2.toFixed(6)} kg`} />
+                      )}
+                      {inferenceCo2 != null && (
+                        <DetailRow label="Infer CO₂" value={`${inferenceCo2.toFixed(6)} kg`} />
+                      )}
+                      {result.training_energy_kwh != null && (
+                        <DetailRow label="Train Energy" value={`${result.training_energy_kwh.toFixed(8)} kWh`} />
+                      )}
+                      {(result.inference_energy_kwh ?? result.energy_kwh) != null && (
+                        <DetailRow
+                          label="Infer Energy"
+                          value={`${(result.inference_energy_kwh ?? result.energy_kwh ?? 0).toFixed(8)} kWh`}
+                        />
                       )}
                       {result.student_params != null && (
                         <DetailRow label="Student Params" value={result.student_params.toLocaleString()} />

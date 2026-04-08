@@ -43,12 +43,21 @@ export function EnergySection({ energy, savedResults = [] }: EnergySectionProps)
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Compression Results</p>
               {savedResults.map((r, i) => {
                 const label = `${r.model_name || r.model_key || 'Model'} · ${r.compression_method || r.strategy}`;
+                const trainingCo2 = r.training_co2_kg ?? r.training_emissions_kg;
+                const inferenceCo2 = r.inference_co2_kg ?? r.inference_emissions_kg ?? r.emissions_kg;
+                const inferenceEnergy = r.inference_energy_kwh ?? r.energy_kwh;
                 return (
                   <div key={i} className="bg-gray-50 rounded-lg p-3 flex items-center justify-between">
                     <div>
                       <p className="text-sm font-medium text-gray-700">{label}</p>
                       <p className="text-xs text-gray-500 mt-0.5">
-                        {r.emissions_kg != null ? `CO₂: ${r.emissions_kg.toFixed(6)} kg` : 'No emission data'}
+                        {trainingCo2 != null ? `Train CO₂: ${trainingCo2.toFixed(6)} kg` : 'Train CO₂: —'}
+                      </p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {inferenceCo2 != null ? `Infer CO₂: ${inferenceCo2.toFixed(6)} kg` : 'Infer CO₂: —'}
+                      </p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {inferenceEnergy != null ? `Infer Energy: ${inferenceEnergy.toFixed(8)} kWh` : 'Infer Energy: —'}
                       </p>
                     </div>
                     <div className="text-right">

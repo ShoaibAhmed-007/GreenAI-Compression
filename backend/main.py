@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from typing import Optional
 import os
 import json
+import re
 import subprocess
 import sys
 import time
@@ -77,6 +78,27 @@ def load_json(filename):
         return None
     with open(path, "r") as f:
         return json.load(f)
+
+
+def _normalize_model_key(value: str) -> str:
+    """Normalize model key names to a stable lowercase underscore format."""
+    key = (value or "").strip().lower().replace("-", "_")
+    key = re.sub(r"\s+", "_", key)
+    key = re.sub(r"[^a-z0-9_]", "", key)
+    return key
+
+
+def _format_params_label(total_params: Optional[int]) -> str:
+    """Format parameter counts as compact human-readable labels (e.g., 11.2M)."""
+    if total_params is None:
+        return "N/A"
+    if total_params >= 1_000_000_000:
+        return f"{total_params / 1_000_000_000:.1f}B"
+    if total_params >= 1_000_000:
+        return f"{total_params / 1_000_000:.1f}M"
+    if total_params >= 1_000:
+        return f"{total_params / 1_000:.1f}K"
+    return str(total_params)
 
 
 def list_models():
@@ -139,12 +161,51 @@ async def health_check():
 # ============================================================
 
 def load_baseline_results():
-    """Load pre-computed baseline results for all models."""
-    path = os.path.join(RESULTS_DIR, "baseline_all_models.json")
-    if not os.path.exists(path):
-        return None
-    with open(path, "r") as f:
-        return json.load(f)
+    """Load baseline-like model metrics by aggregating per-model training result files."""
+    suffixes = ("_training_result.json", "_training_results.json")
+    baselines = {}
+
+    if not os.path.exists(RESULTS_DIR):
+        return baselines
+
+    for filename in sorted(os.listdir(RESULTS_DIR)):
+        if not filename.endswith(suffixes):
+            continue
+
+        path = os.path.join(RESULTS_DIR, filename)
+        try:
+            with open(path, "r") as f:
+                payload = json.load(f)
+        except Exception:
+            continue
+
+        if not isinstance(payload, dict):
+            continue
+
+        model_name_raw = payload.get("model_name") or filename
+        model_key = _normalize_model_key(model_name_raw)
+        if not model_key:
+            model_key = _normalize_model_key(
+                filename.replace("_training_result.json", "").replace("_training_results.json", "")
+            )
+
+        total_params = payload.get("total_params", payload.get("parameters"))
+        size_mb = payload.get("size_MB", payload.get("original_size_MB"))
+
+        baselines[model_key] = {
+            "model_key": model_key,
+            "model_name": model_name_raw,
+            "params_label": _format_params_label(total_params),
+            "total_params": total_params,
+            "input_size": payload.get("input_size"),
+            "dataset": payload.get("dataset", "CIFAR10"),
+            "accuracy": payload.get("accuracy"),
+            "size_MB": round(size_mb, 2) if isinstance(size_mb, (int, float)) else size_mb,
+            "latency_ms": payload.get("latency_ms"),
+            "status": "ready",
+        }
+
+    return baselines
 
 
 @app.get("/api/baselines")
@@ -158,22 +219,8 @@ async def get_baselines():
     from compress import PRELOADED_MODELS
 
     baselines = load_baseline_results()
-    if baselines is None:
-        # Return model list with not_ready status
-        models = {}
-        for key, cfg in PRELOADED_MODELS.items():
-            models[key] = {
-                "model_key": key,
-                "model_name": cfg["name"],
-                "params_label": cfg["params"],
-                "input_size": cfg["input_size"],
-                "dataset": cfg["dataset"],
-                "status": "not_ready",
-            }
-        return {"models": models, "ready_count": 0, "total_count": len(models)}
 
-    ready = sum(1 for v in baselines.values() if v.get("status") == "ready")
-    # Merge with PRELOADED_MODELS info for any missing models
+    # Merge with PRELOADED_MODELS metadata and mark missing entries as not_ready
     for key, cfg in PRELOADED_MODELS.items():
         if key not in baselines:
             baselines[key] = {
@@ -184,6 +231,15 @@ async def get_baselines():
                 "dataset": cfg["dataset"],
                 "status": "not_ready",
             }
+            continue
+
+        # Keep canonical display metadata from configured preloaded model catalog.
+        baselines[key]["model_name"] = cfg["name"]
+        baselines[key]["params_label"] = baselines[key].get("params_label") or cfg["params"]
+        baselines[key]["input_size"] = baselines[key].get("input_size") or cfg["input_size"]
+        baselines[key]["dataset"] = baselines[key].get("dataset") or cfg["dataset"]
+
+    ready = sum(1 for v in baselines.values() if v.get("status") == "ready")
 
     return {"models": baselines, "ready_count": ready, "total_count": len(baselines)}
 
@@ -192,9 +248,10 @@ async def get_baselines():
 async def get_baseline_detail(model_key: str):
     """Get baseline metrics for a specific model."""
     baselines = load_baseline_results()
-    if baselines is None or model_key not in baselines:
+    key = _normalize_model_key(model_key)
+    if key not in baselines:
         raise HTTPException(status_code=404, detail=f"Baseline not found for '{model_key}'")
-    return baselines[model_key]
+    return baselines[key]
 
 
 # Track prepare task

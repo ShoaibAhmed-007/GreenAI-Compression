@@ -2,16 +2,16 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import {
-  DashboardData, DynamicResult, BaselinesResponse,
-  fetchAPI, getBaselines,
-  loadSavedResults, saveResult, dynamicResultToStrategy,
+  DashboardData, DynamicResult, BaselinesResponse, Strategy,
+  fetchAPI, getBaselines, clearSavedResults,
+  dynamicResultToStrategy,
 } from '@/lib/api';
 import { StatsCards } from '@/components/StatsCards';
 import { ComparisonTable } from '@/components/ComparisonTable';
 import { CompressionChart } from '@/components/CompressionChart';
 import { EnergySection } from '@/components/EnergySection';
 import { ModelGrid } from '@/components/ModelGrid';
-import { ModelDashboard } from '@/components/ModelDashboard';
+import { ModelDashboard } from '../components/ModelDashboard';
 import { PreparePanel } from '@/components/PreparePanel';
 
 export default function Home() {
@@ -22,50 +22,87 @@ export default function Home() {
   const [savedResults, setSavedResults] = useState<DynamicResult[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
 
-  // Load saved results from localStorage on mount
-  useEffect(() => {
-    setSavedResults(loadSavedResults());
+  const normalizeModelKey = useCallback((result: DynamicResult): string => {
+    const key = (result.model_key || result.model_name || '').trim().toLowerCase();
+    return key.replace(/\s+/g, '_');
   }, []);
 
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
-      const [dashboard, baselineData] = await Promise.all([
+      console.log('[Dashboard] loading latest dashboard and baselines');
+      const [dashboardResult, baselinesResult] = await Promise.allSettled([
         fetchAPI('/api/dashboard'),
-        getBaselines().catch(() => null),
+        getBaselines(),
       ]);
+
+      if (dashboardResult.status !== 'fulfilled') {
+        throw dashboardResult.reason;
+      }
+
+      const dashboard = dashboardResult.value;
+      const baselineData = baselinesResult.status === 'fulfilled' ? baselinesResult.value : null;
+
       setData(dashboard);
       if (baselineData) setBaselines(baselineData);
+
       setError(null);
     } catch (err: any) {
       setError(err.message || 'Failed to connect to API');
+      console.error('[Dashboard] failed to load dashboard data:', err);
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    // Force clean dashboard sections on load; only new run results are kept in memory.
+    setSavedResults([]);
+    clearSavedResults();
     loadData();
-    const interval = setInterval(loadData, 30000);
+    const interval = setInterval(loadData, 15000);
     return () => clearInterval(interval);
   }, [loadData]);
 
   const handleNewResult = useCallback((result: DynamicResult) => {
-    const updated = saveResult(result);
-    setSavedResults(updated);
+    console.log('[Dashboard] new compression result received:', {
+      model: result.model_key || result.model_name,
+      strategy: result.strategy,
+    });
+
+    setSavedResults((prev) => {
+      const newKey = `${normalizeModelKey(result)}_${result.strategy || result.compression_method || 'unknown'}`;
+      const filtered = prev.filter((r) => {
+        const existingKey = `${normalizeModelKey(r)}_${r.strategy || r.compression_method || 'unknown'}`;
+        return existingKey !== newKey;
+      });
+      return [...filtered, result];
+    });
+  }, [normalizeModelKey]);
+
+  const handleResetSessionResults = useCallback(() => {
+    setSavedResults([]);
+    clearSavedResults();
+    setSelectedModel(null);
   }, []);
+
+  useEffect(() => {
+    if (selectedModel && baselines && !baselines.models[selectedModel]) {
+      setSelectedModel(null);
+    }
+  }, [selectedModel, baselines]);
 
   // Get compression results for a specific model
   const getResultsForModel = (modelKey: string): DynamicResult[] => {
     return savedResults.filter(
-      r => (r.model_key || r.model_name || '').toLowerCase() === modelKey.toLowerCase()
+      r => normalizeModelKey(r) === modelKey.toLowerCase()
     );
   };
 
   // Count compression results per model
   const compressionCounts: Record<string, number> = {};
   savedResults.forEach(r => {
-    const key = (r.model_key || r.model_name || '').toLowerCase();
+    const key = normalizeModelKey(r);
     if (key) compressionCounts[key] = (compressionCounts[key] || 0) + 1;
   });
 
@@ -123,6 +160,10 @@ export default function Home() {
       latency_ms: baselineModel.latency_ms || 0,
       params: baselineModel.total_params || 0,
       co2_kg: undefined,
+      training_co2_kg: undefined,
+      inference_co2_kg: undefined,
+      training_energy_kwh: undefined,
+      inference_energy_kwh: undefined,
       flops_M: undefined,
       sparsity_percent: undefined,
     };
@@ -143,11 +184,18 @@ export default function Home() {
 
   // Stats: pick best across all results
   const bestStrategy = allStrategies.length > 0
-    ? allStrategies.sort((a, b) => b.size_reduction - a.size_reduction)[0]
+    ? [...allStrategies].sort((a, b) => b.size_reduction - a.size_reduction)[0]
     : undefined;
 
   const readyCount = baselines?.ready_count || 0;
   const totalCount = baselines?.total_count || 15;
+
+  const readyBaselineModels = Object.values(baselines?.models || {}).filter(
+    (m) => m.status === 'ready' && typeof m.size_MB === 'number'
+  );
+  const smallestBaselineModel = readyBaselineModels.length > 0
+    ? [...readyBaselineModels].sort((a, b) => (a.size_MB || 0) - (b.size_MB || 0))[0]
+    : null;
 
   return (
     <div className="space-y-6">
@@ -155,10 +203,26 @@ export default function Home() {
       <StatsCards
         baseline={undefined}
         bestStrategy={bestStrategy}
+        smallestModelName={smallestBaselineModel?.model_name}
+        smallestModelSizeMB={smallestBaselineModel?.size_MB}
         gpuAvailable={data.gpu_available}
         totalModels={totalCount}
         dynamicCount={savedResults.length}
       />
+
+      <div className="flex justify-end">
+        <button
+          onClick={handleResetSessionResults}
+          disabled={savedResults.length === 0}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors border ${
+            savedResults.length === 0
+              ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+              : 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
+          }`}
+        >
+          Reset Current Session Results
+        </button>
+      </div>
 
       {/* Prepare Panel */}
       {baselines && (
@@ -202,9 +266,7 @@ export default function Home() {
       </div>
 
       {/* Energy */}
-      {(data.energy && Object.keys(data.energy).length > 0 || savedResults.length > 0) && (
-        <EnergySection energy={data.energy} savedResults={savedResults} />
-      )}
+      <EnergySection energy={{}} savedResults={savedResults} />
     </div>
   );
 }
