@@ -933,8 +933,11 @@ def apply_quantization(model, train_loader, test_loader, device,
         acc = evaluate(model, test_loader, dev=device)
         _cb(f"Pre-QAT Epoch {epoch+1} Accuracy: {acc:.2f}%")
 
-    # ✅ Move to CPU for QAT (as required)
-    model = model.cpu()
+    # ✅ Prepare for QAT — fbgemm/qnnpack only support QuantizedCPU, so QAT runs on CPU
+    # GPU was used for float32 pre-finetuning above; now drop back to CPU
+    _cb("Moving model to CPU for QAT (fbgemm/qnnpack are CPU-only backends)...")
+    qat_dev = torch.device('cpu')
+    model.to(qat_dev)
     model.train()
 
     if hasattr(model, 'fuse_model'):
@@ -943,23 +946,23 @@ def apply_quantization(model, train_loader, test_loader, device,
     model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
     torch.quantization.prepare_qat(model, inplace=True)
 
-    # ✅ STRONG QAT TRAINING
-    _cb("Starting QAT training...")
+    # ✅ STRONG QAT TRAINING (all on CPU)
+    _cb("Starting QAT training (CPU)...")
     optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
 
     best_acc = 0
     best_state = copy.deepcopy(model.state_dict())
 
-    for epoch in range(fine_tune_epochs):  # now 10+
+    for epoch in range(fine_tune_epochs):
         for inputs, labels in train_loader:
-            inputs, labels = inputs.cpu(), labels.cpu()
+            inputs, labels = inputs.to(qat_dev), labels.to(qat_dev)
 
             optimizer.zero_grad()
             loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
             loss.backward()
             optimizer.step()
 
-        acc = evaluate(model, test_loader, dev=torch.device('cpu'))
+        acc = evaluate(model, test_loader, dev=qat_dev)
         _cb(f"QAT Epoch {epoch+1}/{fine_tune_epochs} - Accuracy: {acc:.2f}%")
 
         if acc > best_acc:
@@ -968,8 +971,8 @@ def apply_quantization(model, train_loader, test_loader, device,
 
     model.load_state_dict(best_state)
 
-    # ✅ Convert to INT8
-    _cb("Converting to INT8...")
+    # ✅ Convert to INT8 (on CPU — required by fbgemm/qnnpack QuantizedCPU kernel)
+    _cb("Converting to INT8 (CPU)...")
     model.eval()
     torch.quantization.convert(model, inplace=True)
 
@@ -1132,8 +1135,10 @@ def apply_hybrid(model, train_loader, test_loader, device,
 
     # Step 2: Quantize (only nn.Linear is actually supported by
     # QAT so accuracy is preserved better than post-training quantization.
-    _cb("Applying QAT INT8 quantization...")
-    model = model.cpu()
+    # QAT must run on CPU — fbgemm/qnnpack use QuantizedCPU kernel only
+    _cb("Applying QAT INT8 quantization (moving to CPU for QuantizedCPU backend)...")
+    qat_dev = torch.device('cpu')
+    model.to(qat_dev)
     model.eval()
     fallback_float_model = copy.deepcopy(model).cpu().eval()
     try:
@@ -1155,12 +1160,12 @@ def apply_hybrid(model, train_loader, test_loader, device,
             for batch_idx, (inputs, labels) in enumerate(train_loader):
                 if batch_idx >= 50:
                     break
-                inputs, labels = inputs.cpu(), labels.cpu()
+                inputs, labels = inputs.to(qat_dev), labels.to(qat_dev)
                 optimizer.zero_grad()
                 loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
                 loss.backward()
                 optimizer.step()
-            epoch_acc = evaluate(model, test_loader, dev=torch.device('cpu'), max_batches=20)
+            epoch_acc = evaluate(model, test_loader, dev=qat_dev, max_batches=20)
             _log_guard("hybrid-qat", epoch + 1, epoch_acc, baseline_acc, allowed_drop)
             _record_accuracy_checkpoint(
                 accuracy_checkpoints,
@@ -1177,6 +1182,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
                 print("[Hybrid/QAT] Accuracy guard triggered; stopping QAT early.")
                 break
         model.load_state_dict(best_state)
+        model.eval()
         qat_api.convert(model, inplace=True)
         quant_model = model
         hybrid_quantization_type = "qat_int8"

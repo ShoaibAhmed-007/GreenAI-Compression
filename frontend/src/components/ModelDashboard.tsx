@@ -538,7 +538,7 @@ export function ModelDashboard({ model, modelKey, compressionResults, onNewResul
                         <td className="py-2 pr-3 font-medium text-gray-900">{STRATEGY_LABELS[r.strategy] || r.strategy}</td>
                         <td className="text-right py-2 px-2 font-mono text-gray-700">{r.compressed_accuracy}%</td>
                         <td className="text-right py-2 px-2 font-mono text-gray-700">{r.size_MB} MB</td>
-                        <td className="text-right py-2 px-2 font-mono text-green-600">↓{r.size_reduction_percent.toFixed(1)}%</td>
+                        <td className="text-right py-2 px-2 font-mono text-green-600">↓{(r.size_reduction_percent || 0).toFixed(1)}%</td>
                         <td className="text-right py-2 px-2 font-mono text-gray-500">{r.emissions_kg?.toFixed(6) || '—'}</td>
                       </tr>
                     ))}
@@ -581,15 +581,15 @@ function ResultCard({
       >
         <div className="flex items-center gap-2">
           <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
-            result.size_reduction_percent > 50 ? 'bg-green-100 text-green-700' :
-            result.size_reduction_percent > 20 ? 'bg-blue-100 text-blue-700' :
+            (result.size_reduction_percent || 0) > 50 ? 'bg-green-100 text-green-700' :
+            (result.size_reduction_percent || 0) > 20 ? 'bg-blue-100 text-blue-700' :
             'bg-gray-100 text-gray-700'
           }`}>
             {methodLabel}
           </span>
         </div>
         <div className="flex items-center gap-3 text-xs">
-          <span className="font-mono text-green-600">↓{result.size_reduction_percent.toFixed(1)}%</span>
+          <span className="font-mono text-green-600">↓{(result.size_reduction_percent || 0).toFixed(1)}%</span>
           <span className={`font-mono ${accDiff >= -1 ? 'text-blue-600' : 'text-red-500'}`}>
             {result.compressed_accuracy}%
           </span>
