@@ -78,6 +78,16 @@ export interface CompressionStep {
   label: string;
 }
 
+export interface AccuracyCheckpoint {
+  stage: string;
+  step: number;
+  accuracy: number;
+  baseline_accuracy: number;
+  accuracy_drop: number;
+  within_threshold: boolean;
+  allowed_drop: number;
+}
+
 export interface CompressionStatus {
   running: boolean;
   step: string;
@@ -107,6 +117,8 @@ export interface DynamicResult {
   input_size?: number;
   baseline_accuracy: number;
   compressed_accuracy: number;
+  accuracy_drop_threshold?: number;
+  accuracy_checkpoints?: AccuracyCheckpoint[];
   size_MB: number;
   baseline_size_MB: number;
   size_reduction_percent: number;

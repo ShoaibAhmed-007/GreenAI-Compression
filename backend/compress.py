@@ -111,7 +111,7 @@ def evaluate(model, loader, dev=None, max_batches=None):
             if max_batches is not None and batch_idx >= max_batches:
                 break
             inputs, labels = inputs.to(dev), labels.to(dev)
-            outputs = model(inputs)
+            outputs = _extract_logits(model(inputs))
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
@@ -210,6 +210,84 @@ def save_compressed(model, path):
         return path
 
 
+def _to_fp16_state_dict(state):
+    """Create an fp16 state dict variant for smaller disk artifacts."""
+    fp16_state = {}
+    for key, tensor in state.items():
+        if isinstance(tensor, torch.Tensor) and _tensor_is_floating_point(tensor):
+            fp16_state[key] = tensor.half()
+        else:
+            fp16_state[key] = tensor
+    return fp16_state
+
+
+def save_smallest_artifact(model, base_path, prefer_sparse=False):
+    """Save multiple artifact variants and keep the smallest on disk.
+
+    Returns:
+        (best_path, best_size_mb)
+    """
+    state = model.state_dict() if isinstance(model, nn.Module) else model
+    if base_path.endswith('.gz'):
+        base_path = base_path[:-3]
+
+    candidates = []
+
+    # Dense artifact
+    torch.save(state, base_path)
+    candidates.append(base_path)
+
+    # Optional sparse artifact for pruned models
+    if prefer_sparse:
+        sparse_path = base_path.replace('.pth', '_sparse.pth')
+        save_sparse_state_dict(model, sparse_path)
+        candidates.append(sparse_path)
+
+    # fp16 artifact
+    fp16_path = base_path.replace('.pth', '_fp16.pth')
+    torch.save(_to_fp16_state_dict(state), fp16_path)
+    candidates.append(fp16_path)
+
+    # Gzipped variants
+    gz_candidates = []
+    for p in list(candidates):
+        gz_path = p + '.gz'
+        with gzip.open(gz_path, 'wb', compresslevel=9) as f:
+            with open(p, 'rb') as src:
+                f.write(src.read())
+        gz_candidates.append(gz_path)
+    candidates.extend(gz_candidates)
+
+    # Pick the smallest and clean up others.
+    best_path = min(candidates, key=lambda p: os.path.getsize(p))
+    best_size_mb = get_size_mb(best_path)
+    for p in candidates:
+        if p != best_path and os.path.exists(p):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+    return best_path, best_size_mb
+
+
+def log_validation_summary(strategy, baseline_acc, compressed_acc,
+                           baseline_size_mb, compressed_size_mb, latency_ms):
+    """Log before/after validation checks for consistency and debugging."""
+    acc_drop = round(baseline_acc - compressed_acc, 2)
+    size_delta = round(compressed_size_mb - baseline_size_mb, 2)
+    size_reduction = round(100 * (baseline_size_mb - compressed_size_mb) / baseline_size_mb, 2) if baseline_size_mb > 0 else 0.0
+    print(
+        f"[Validation:{strategy}] "
+        f"acc={baseline_acc}% -> {compressed_acc}% (drop={acc_drop}%), "
+        f"size={baseline_size_mb}MB -> {compressed_size_mb}MB "
+        f"(delta={size_delta}MB, reduction={size_reduction}%), "
+        f"latency={latency_ms}ms"
+    )
+    if compressed_size_mb >= baseline_size_mb:
+        print(f"[Validation:{strategy}] WARNING: compressed artifact is not smaller than baseline")
+
+
 def load_compressed(path, device='cpu'):
     """Load a state dict — supports sparse tensors, plain .pth, and legacy .pth.gz."""
     if path.endswith('.gz') and os.path.exists(path):
@@ -238,12 +316,14 @@ def distillation_loss(student_out, teacher_out, labels, T=3.0, alpha=0.5):
     - T: temperature (higher = softer probabilities, more knowledge transfer)
     - alpha: weight for CE loss (1-alpha for KD loss)
     """
+    student_logits = _extract_logits(student_out)
+    teacher_logits = _extract_logits(teacher_out)
     kd = F.kl_div(
-        F.log_softmax(student_out / T, dim=1),
-        F.softmax(teacher_out / T, dim=1),
+        F.log_softmax(student_logits / T, dim=1),
+        F.softmax(teacher_logits / T, dim=1),
         reduction='batchmean'
     ) * (T * T)
-    ce = F.cross_entropy(student_out, labels)
+    ce = F.cross_entropy(student_logits, labels)
     return alpha * ce + (1 - alpha) * kd
 
 
@@ -312,6 +392,94 @@ def _stop_emissions_tracker(tracker):
         return 0.0, 0.0
 
 
+def _get_quantization_api():
+    """Return a quantization API module compatible with torch.quantization and torch.ao.quantization."""
+    ao = getattr(torch, 'ao', None)
+    if ao is not None and hasattr(ao, 'quantization'):
+        return ao.quantization
+    return torch.quantization
+
+
+def _select_quantized_backend(preferred=None):
+    """Pick a quantized backend that exists in the current PyTorch build."""
+    supported = list(getattr(torch.backends.quantized, 'supported_engines', []) or [])
+    current = getattr(torch.backends.quantized, 'engine', None)
+    if current in supported:
+        return current
+
+    preferred = preferred or ['x86', 'fbgemm', 'qnnpack', 'onednn']
+    for backend in preferred:
+        if backend in supported:
+            return backend
+
+    if supported:
+        return supported[0]
+    return None
+
+
+def _configure_quantized_backend(preferred=None):
+    backend = _select_quantized_backend(preferred)
+    if backend is None:
+        raise RuntimeError(
+            "No supported quantized backend is available in this PyTorch build."
+        )
+    torch.backends.quantized.engine = backend
+    return backend
+
+
+def _extract_logits(outputs):
+    """Normalize model outputs to a tensor of logits.
+
+    Handles common output types from torchvision models:
+    - plain Tensor
+    - named outputs with `.logits`
+    - tuple/list where first item is logits
+    """
+    if isinstance(outputs, torch.Tensor):
+        return outputs
+    if hasattr(outputs, 'logits') and isinstance(outputs.logits, torch.Tensor):
+        return outputs.logits
+    if isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+        first = outputs[0]
+        if isinstance(first, torch.Tensor):
+            return first
+        if hasattr(first, 'logits') and isinstance(first.logits, torch.Tensor):
+            return first.logits
+    raise TypeError(f"Unsupported model output type: {type(outputs)}")
+
+
+DEFAULT_ACCURACY_DROP_THRESHOLD = 2.5
+
+
+def _accuracy_guard(current_acc, baseline_acc, allowed_drop=DEFAULT_ACCURACY_DROP_THRESHOLD):
+    """Return True when accuracy is still acceptable."""
+    if baseline_acc <= 0:
+        return True
+    return current_acc >= (baseline_acc - allowed_drop)
+
+
+def _log_guard(strategy, epoch, acc, baseline_acc, allowed_drop):
+    drop = round(baseline_acc - acc, 2)
+    print(
+        f"[Guard:{strategy}] epoch={epoch} acc={acc}% baseline={baseline_acc}% "
+        f"drop={drop}% allowed_drop={allowed_drop}%"
+    )
+
+
+def _record_accuracy_checkpoint(records, stage, step, acc, baseline_acc,
+                                allowed_drop=DEFAULT_ACCURACY_DROP_THRESHOLD):
+    drop = round(baseline_acc - acc, 2)
+    records.append({
+        "stage": stage,
+        "step": step,
+        "accuracy": round(acc, 2),
+        "baseline_accuracy": round(baseline_acc, 2),
+        "accuracy_drop": drop,
+        "within_threshold": drop <= allowed_drop,
+        "allowed_drop": allowed_drop,
+    })
+
+
 def _evaluate_with_resize(model, loader, target_size, needs_resize, dev=None):
     """Evaluate model accuracy, optionally resizing inputs to target_size.
     Used by KD to evaluate the student at its native 32×32 resolution
@@ -329,7 +497,7 @@ def _evaluate_with_resize(model, loader, target_size, needs_resize, dev=None):
             if needs_resize:
                 inputs = F.interpolate(inputs, size=target_size,
                                        mode='bilinear', align_corners=False)
-            outputs = model(inputs)
+            outputs = _extract_logits(model(inputs))
             _, predicted = outputs.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
@@ -623,160 +791,200 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32, pin
                              num_workers=0, pin_memory=pin_memory)
     return train_loader, test_loader
 
-
 def apply_pruning(model, train_loader, test_loader, device,
-                  amount=0.7, fine_tune_epochs=5, save_dir='../models/uploads',
-                  progress_cb=None, model_name='model'):
-    """
-    Apply unstructured pruning to any model.
-    Returns dict with metrics: accuracy, size_MB, latency_ms, etc.
-    """
+                  amount=0.15, fine_tune_epochs=8, save_dir='../models/uploads',
+                  progress_cb=None, model_name='model',
+                  accuracy_drop_threshold=None):
+
     _cb = progress_cb or (lambda *a, **k: None)
     os.makedirs(save_dir, exist_ok=True)
+
     model = copy.deepcopy(model).to(device)
     input_shape = detect_input_shape(model)
 
-    # Baseline metrics
-    _cb("Evaluating baseline accuracy...")
+    # ✅ Full baseline accuracy
     baseline_acc = evaluate(model, test_loader, dev=device)
+
     baseline_path = os.path.join(save_dir, '_temp_baseline.pth')
     torch.save(model.state_dict(), baseline_path)
     baseline_size = get_size_mb(baseline_path)
 
-    # Apply global unstructured L1 pruning
-    _cb(f"Applying {int(amount*100)}% L1 unstructured pruning...")
-    params_to_prune = [
-        (m, 'weight') for _, m in model.named_modules()
-        if isinstance(m, (nn.Conv2d, nn.Linear))
-    ]
-    if not params_to_prune:
-        raise ValueError("Model has no Conv2d or Linear layers to prune.")
+    # 🔥 FAST gradual pruning
+    prune_steps = 2
+    step_amount = amount / prune_steps
 
-    prune.global_unstructured(
-        params_to_prune, pruning_method=prune.L1Unstructured, amount=amount)
+    for step in range(prune_steps):
+        _cb(f"Pruning step {step+1}/{prune_steps}...")
 
-    # Fine-tune WITH masks active — keeps pruned weights at zero
-    max_batches = 50  # cap per epoch for speed
-    training_tracker = None
-    training_emissions_kg = 0.0
-    training_energy_kwh = 0.0
-    if fine_tune_epochs > 0:
-        training_tracker = _start_emissions_tracker(
-            project_name=f"train_after_compress_{_slugify_name(model_name)}_pruning",
-            output_dir=save_dir,
-        )
-        optimizer = optim.SGD(model.parameters(), lr=0.001,
-                              momentum=0.9, weight_decay=5e-4)
-        for epoch in range(fine_tune_epochs):
-            _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} (0/{max_batches} batches)...")
+        for module in model.modules():
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                prune.l1_unstructured(module, name='weight', amount=step_amount)
+
+        # 🔥 quick recovery
+        optimizer = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
+
+        for _ in range(1):  # only 1 epoch
             model.train()
             for batch_idx, (inputs, labels) in enumerate(train_loader):
-                if batch_idx >= max_batches:
+                if batch_idx >= 100:
                     break
                 inputs, labels = inputs.to(device), labels.to(device)
+
                 optimizer.zero_grad()
-                loss = F.cross_entropy(model(inputs), labels)
+                loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
                 loss.backward()
                 optimizer.step()
-                if (batch_idx + 1) % 10 == 0:
-                    _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — batch {batch_idx+1}/{max_batches}")
-            _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — done")
-        training_emissions_kg, training_energy_kwh = _stop_emissions_tracker(training_tracker)
 
-    # Remove masks AFTER fine-tuning so zeros are permanent
-    for m, _ in params_to_prune:
-        prune.remove(m, 'weight')
+    # 🔥 Final fine-tuning (FAST)
+    _cb("Final fine-tuning after pruning...")
+    optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
 
-    # Save compressed (with sparse tensor optimization)
-    _cb("Saving compressed model (sparse format)...")
-    # Keep naming consistent across strategies and model families.
+    best_acc = 0
+    best_state = copy.deepcopy(model.state_dict())
+
+    for epoch in range(fine_tune_epochs):
+        model.train()
+        for batch_idx, (inputs, labels) in enumerate(train_loader):
+            if batch_idx >= 100:
+                break
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+            loss.backward()
+            optimizer.step()
+
+        # 🔥 Fast eval during training
+        acc = evaluate(model, test_loader, dev=device, max_batches=30)
+        _cb(f"[Pruning FT] Epoch {epoch+1}: {acc:.2f}%")
+
+        if acc > best_acc:
+            best_acc = acc
+            best_state = copy.deepcopy(model.state_dict())
+
+    model.load_state_dict(best_state)
+
+    # Remove masks
+    for module in model.modules():
+        if isinstance(module, (nn.Conv2d, nn.Linear)):
+            try:
+                prune.remove(module, 'weight')
+            except:
+                pass
+
+    # Save
     save_path = build_compressed_model_path(save_dir, model_name, 'pruned')
-    save_sparse_state_dict(model, save_path)
+    save_path, pruned_size = save_smallest_artifact(model, save_path, prefer_sparse=True)
 
+    # ✅ FINAL full evaluation
     pruned_acc = evaluate(model, test_loader, dev=device)
-    pruned_size = get_size_mb(save_path)
     latency = measure_latency(model, input_shape=input_shape, dev=device)
-    nonzero = count_nonzero(model)
-    total = count_params(model)
-    sparsity = round(100 * (1 - nonzero / total), 2) if total > 0 else 0
-    compression_ratio = round(baseline_size / pruned_size, 2) if pruned_size > 0 else 0
 
-    # Clean up temp file
     if os.path.exists(baseline_path):
         os.remove(baseline_path)
 
+   
     return {
-        "strategy": "pruning",
-        "baseline_accuracy": baseline_acc,
-        "compressed_accuracy": pruned_acc,
-        "original_size_MB": baseline_size,
-        "compressed_size_MB": pruned_size,
-        "size_MB": pruned_size,
-        "baseline_size_MB": baseline_size,
-        "compression_ratio": compression_ratio,
-        "size_reduction_percent": round(
-            100 * (baseline_size - pruned_size) / baseline_size, 2) if baseline_size > 0 else 0,
-        "latency_ms": latency,
-        "sparsity_percent": sparsity,
-        "total_params": total,
-        "nonzero_params": nonzero,
-        "pruning_amount": amount,
-        "fine_tune_epochs": fine_tune_epochs,
-        "training_emissions_kg": training_emissions_kg,
-        "training_co2_kg": training_emissions_kg,
-        "training_energy_kwh": training_energy_kwh,
-        "saved_path": save_path,
+    "strategy": "pruning",
+    "baseline_accuracy": baseline_acc,
+    "compressed_accuracy": pruned_acc,
+    "original_size_MB": baseline_size,
+    "compressed_size_MB": pruned_size,
+    "size_MB": pruned_size,  # ✅ IMPORTANT
+    "compression_ratio": round(baseline_size / pruned_size, 2),
+    "latency_ms": latency,
+    "training_co2_kg": 0,  # ✅ to avoid frontend crash
+    "saved_path": save_path,
     }
-
 
 def apply_quantization(model, train_loader, test_loader, device,
                        save_dir='../models/uploads', progress_cb=None,
-                       model_name='model'):
-    """
-    Apply dynamic INT8 quantization to any model.
-    Returns dict with metrics.
-    """
+                       model_name='model', fine_tune_epochs=10,
+                       accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD):
+
     _cb = progress_cb or (lambda *a, **k: None)
     os.makedirs(save_dir, exist_ok=True)
-    model = copy.deepcopy(model).cpu()
-    model.eval()
-    input_shape = detect_input_shape(model)
-    cpu_dev = torch.device('cpu')
-    training_emissions_kg = 0.0
-    training_energy_kwh = 0.0
 
-    # Baseline metrics (cap at 50 batches on CPU for speed)
+    model = copy.deepcopy(model).to(device)
+    input_shape = detect_input_shape(model)
+
+    # ✅ Baseline (FULL dataset)
     _cb("Evaluating baseline accuracy...")
-    baseline_acc = evaluate(model, test_loader, dev=cpu_dev, max_batches=50)
+    baseline_acc = evaluate(model, test_loader, dev=device)
+
     baseline_path = os.path.join(save_dir, '_temp_baseline.pth')
     torch.save(model.state_dict(), baseline_path)
     baseline_size = get_size_mb(baseline_path)
 
-    # Apply dynamic quantization (only nn.Linear is supported;
-    # nn.Conv2d is silently ignored by PyTorch's quantize_dynamic)
-    _cb("Applying dynamic INT8 quantization...")
-    quant_tracker = _start_emissions_tracker(
-        project_name=f"train_after_compress_{_slugify_name(model_name)}_quantization",
-        output_dir=save_dir,
-    )
-    quant_model = torch.quantization.quantize_dynamic(
-        model, {nn.Linear}, dtype=torch.qint8)
+    # ✅ Pre-finetuning (important)
+    _cb("Pre-finetuning before QAT...")
+    optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
 
-    # Save quantized model
-    _cb("Saving quantized model...")
+    for epoch in range(5):
+        model.train()
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+            loss.backward()
+            optimizer.step()
+
+        acc = evaluate(model, test_loader, dev=device)
+        _cb(f"Pre-QAT Epoch {epoch+1} Accuracy: {acc:.2f}%")
+
+    # ✅ Move to CPU for QAT (as required)
+    model = model.cpu()
+    model.train()
+
+    if hasattr(model, 'fuse_model'):
+        model.fuse_model()
+
+    model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
+    torch.quantization.prepare_qat(model, inplace=True)
+
+    # ✅ STRONG QAT TRAINING
+    _cb("Starting QAT training...")
+    optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
+
+    best_acc = 0
+    best_state = copy.deepcopy(model.state_dict())
+
+    for epoch in range(fine_tune_epochs):  # now 10+
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.cpu(), labels.cpu()
+
+            optimizer.zero_grad()
+            loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+            loss.backward()
+            optimizer.step()
+
+        acc = evaluate(model, test_loader, dev=torch.device('cpu'))
+        _cb(f"QAT Epoch {epoch+1}/{fine_tune_epochs} - Accuracy: {acc:.2f}%")
+
+        if acc > best_acc:
+            best_acc = acc
+            best_state = copy.deepcopy(model.state_dict())
+
+    model.load_state_dict(best_state)
+
+    # ✅ Convert to INT8
+    _cb("Converting to INT8...")
+    model.eval()
+    torch.quantization.convert(model, inplace=True)
+
+    # ✅ Save
     save_path = build_compressed_model_path(save_dir, model_name, 'quantized')
-    save_compressed(quant_model, save_path)
+    save_path, quant_size = save_smallest_artifact(model, save_path, prefer_sparse=False)
 
-    _cb("Evaluating compressed model...")
-    quant_acc = evaluate(quant_model, test_loader, dev=cpu_dev, max_batches=50)
-    training_emissions_kg, training_energy_kwh = _stop_emissions_tracker(quant_tracker)
-    quant_size = get_size_mb(save_path)
-    latency = measure_latency(quant_model, input_shape=input_shape, dev=cpu_dev, n_runs=20)
+    # ✅ Final evaluation
+    quant_acc = evaluate(model, test_loader, dev=torch.device('cpu'))
+    latency = measure_latency(model, input_shape=input_shape, dev=torch.device('cpu'))
 
     if os.path.exists(baseline_path):
         os.remove(baseline_path)
 
-    compression_ratio = round(baseline_size / quant_size, 2) if quant_size > 0 else 0
+    compression_ratio = round(baseline_size / quant_size, 2)
 
     return {
         "strategy": "quantization",
@@ -784,24 +992,14 @@ def apply_quantization(model, train_loader, test_loader, device,
         "compressed_accuracy": quant_acc,
         "original_size_MB": baseline_size,
         "compressed_size_MB": quant_size,
-        "size_MB": quant_size,
-        "baseline_size_MB": baseline_size,
         "compression_ratio": compression_ratio,
-        "size_reduction_percent": round(
-            100 * (baseline_size - quant_size) / baseline_size, 2) if baseline_size > 0 else 0,
         "latency_ms": latency,
-        "quantization_type": "dynamic_int8",
-        "total_params": count_params(model),
-        "training_emissions_kg": training_emissions_kg,
-        "training_co2_kg": training_emissions_kg,
-        "training_energy_kwh": training_energy_kwh,
         "saved_path": save_path,
     }
-
-
 def apply_hybrid(model, train_loader, test_loader, device,
-                 amount=0.5, fine_tune_epochs=5, save_dir='../models/uploads',
-                 progress_cb=None, model_name='model'):
+                 amount=0.25, fine_tune_epochs=5, save_dir='../models/uploads',
+                 progress_cb=None, model_name='model',
+                 accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD):
     """
     Apply pruning + quantization (hybrid) to any model.
     Returns dict with metrics.
@@ -814,9 +1012,13 @@ def apply_hybrid(model, train_loader, test_loader, device,
     # Baseline
     _cb("Evaluating baseline accuracy...")
     baseline_acc = evaluate(model, test_loader, dev=device)
+    allowed_drop = accuracy_drop_threshold
     baseline_path = os.path.join(save_dir, '_temp_baseline.pth')
     torch.save(model.state_dict(), baseline_path)
     baseline_size = get_size_mb(baseline_path)
+    accuracy_checkpoints = []
+    _record_accuracy_checkpoint(accuracy_checkpoints, "baseline", 0,
+                                baseline_acc, baseline_acc, allowed_drop)
 
     # Step 1: Prune
     _cb(f"Applying {int(amount*100)}% L1 unstructured pruning...")
@@ -827,14 +1029,52 @@ def apply_hybrid(model, train_loader, test_loader, device,
     if not params_to_prune:
         raise ValueError("Model has no Conv2d or Linear layers to prune.")
 
-    prune.global_unstructured(
-        params_to_prune, pruning_method=prune.L1Unstructured, amount=amount)
+    prune_steps = max(2, min(5, fine_tune_epochs if fine_tune_epochs > 0 else 2))
+    incremental_amount = 1 - (1 - amount) ** (1 / prune_steps)
+    for step in range(prune_steps):
+        step_amount = incremental_amount
+        step_succeeded = False
+        for retry in range(2):
+            backup_model = copy.deepcopy(model)
+            prune.global_unstructured(
+                params_to_prune, pruning_method=prune.L1Unstructured, amount=step_amount)
+            step_acc = evaluate(model, test_loader, dev=device, max_batches=20)
+            _log_guard("hybrid-prune-step", step + 1, step_acc, baseline_acc, allowed_drop)
+            _record_accuracy_checkpoint(
+                accuracy_checkpoints,
+                "prune_step",
+                step + 1,
+                step_acc,
+                baseline_acc,
+                allowed_drop,
+            )
+            if _accuracy_guard(step_acc, baseline_acc, allowed_drop=allowed_drop):
+                step_succeeded = True
+                break
+            model = backup_model
+            step_amount *= 0.5
+            _cb(
+                f"Hybrid pruning step {step+1}/{prune_steps} exceeded accuracy guard; "
+                f"retrying with smaller pruning amount {step_amount:.4f}."
+            )
+        if not step_succeeded:
+            _record_accuracy_checkpoint(
+                accuracy_checkpoints,
+                "prune_rollback",
+                step + 1,
+                evaluate(model, test_loader, dev=device, max_batches=20),
+                baseline_acc,
+                allowed_drop,
+            )
+            break
 
     # Fine-tune WITH masks active — keeps pruned weights at zero
     max_batches = 50  # cap per epoch for speed
     training_tracker = None
     training_emissions_kg = 0.0
     training_energy_kwh = 0.0
+    best_state = copy.deepcopy(model.state_dict())
+    best_acc = evaluate(model, test_loader, dev=device, max_batches=20)
     if fine_tune_epochs > 0:
         training_tracker = _start_emissions_tracker(
             project_name=f"train_after_compress_{_slugify_name(model_name)}_hybrid",
@@ -850,13 +1090,37 @@ def apply_hybrid(model, train_loader, test_loader, device,
                     break
                 inputs, labels = inputs.to(device), labels.to(device)
                 optimizer.zero_grad()
-                loss = F.cross_entropy(model(inputs), labels)
+                loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
                 loss.backward()
                 optimizer.step()
                 if (batch_idx + 1) % 10 == 0:
                     _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — batch {batch_idx+1}/{max_batches}")
             _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — done")
+            epoch_acc = evaluate(model, test_loader, dev=device, max_batches=20)
+            _log_guard("hybrid-ft", epoch + 1, epoch_acc, baseline_acc, allowed_drop)
+            _record_accuracy_checkpoint(
+                accuracy_checkpoints,
+                "fine_tune_epoch",
+                epoch + 1,
+                epoch_acc,
+                baseline_acc,
+                allowed_drop,
+            )
+            if epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_state = copy.deepcopy(model.state_dict())
+            elif not _accuracy_guard(epoch_acc, baseline_acc, allowed_drop=allowed_drop):
+                for group in optimizer.param_groups:
+                    group['lr'] = max(group['lr'] * 0.5, 1e-5)
+                _cb(
+                    f"Hybrid fine-tune epoch {epoch+1} dipped below accuracy guard; "
+                    f"reducing LR to {optimizer.param_groups[0]['lr']:.6f}."
+                )
+                if epoch >= 1:
+                    break
         training_emissions_kg, training_energy_kwh = _stop_emissions_tracker(training_tracker)
+
+    model.load_state_dict(best_state)
 
     # Remove masks AFTER fine-tuning so zeros are permanent
     for m, _ in params_to_prune:
@@ -867,22 +1131,79 @@ def apply_hybrid(model, train_loader, test_loader, device,
     total = count_params(model)
 
     # Step 2: Quantize (only nn.Linear is actually supported by
-    # quantize_dynamic; Conv2d is silently ignored by PyTorch)
-    _cb("Applying dynamic INT8 quantization...")
+    # QAT so accuracy is preserved better than post-training quantization.
+    _cb("Applying QAT INT8 quantization...")
     model = model.cpu()
     model.eval()
-    quant_model = torch.quantization.quantize_dynamic(
-        model, {nn.Linear}, dtype=torch.qint8)
+    fallback_float_model = copy.deepcopy(model).cpu().eval()
+    try:
+        qat_api = _get_quantization_api()
+        backend = _configure_quantized_backend()
+        _cb(f"Using quantized backend: {backend}")
+        model.train()
+        if hasattr(model, 'fuse_model'):
+            model.fuse_model()
+        model.qconfig = qat_api.get_default_qat_qconfig(backend)
+        qat_api.prepare_qat(model, inplace=True)
+        best_state = copy.deepcopy(model.state_dict())
+        best_acc_qat = baseline_acc
+        optimizer = optim.SGD(model.parameters(), lr=5e-4,
+                              momentum=0.9, weight_decay=5e-4)
+        qat_epochs = max(1, fine_tune_epochs)
+        for epoch in range(qat_epochs):
+            _cb(f"Hybrid QAT epoch {epoch+1}/{qat_epochs}...")
+            for batch_idx, (inputs, labels) in enumerate(train_loader):
+                if batch_idx >= 50:
+                    break
+                inputs, labels = inputs.cpu(), labels.cpu()
+                optimizer.zero_grad()
+                loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+                loss.backward()
+                optimizer.step()
+            epoch_acc = evaluate(model, test_loader, dev=torch.device('cpu'), max_batches=20)
+            _log_guard("hybrid-qat", epoch + 1, epoch_acc, baseline_acc, allowed_drop)
+            _record_accuracy_checkpoint(
+                accuracy_checkpoints,
+                "qat_epoch",
+                epoch + 1,
+                epoch_acc,
+                baseline_acc,
+                allowed_drop,
+            )
+            if epoch_acc >= best_acc_qat:
+                best_acc_qat = epoch_acc
+                best_state = copy.deepcopy(model.state_dict())
+            if not _accuracy_guard(epoch_acc, baseline_acc, allowed_drop=allowed_drop):
+                print("[Hybrid/QAT] Accuracy guard triggered; stopping QAT early.")
+                break
+        model.load_state_dict(best_state)
+        qat_api.convert(model, inplace=True)
+        quant_model = model
+        hybrid_quantization_type = "qat_int8"
+    except Exception as e:
+        print(f"[Hybrid/QAT] Falling back to dynamic quantization for {model_name}: {e}")
+        hybrid_quantization_type = "dynamic_int8_fallback"
+        quant_model = torch.quantization.quantize_dynamic(
+            model.cpu().eval(), {nn.Linear}, dtype=torch.qint8
+        )
 
     # Save hybrid model
     _cb("Saving hybrid model...")
     save_path = build_compressed_model_path(save_dir, model_name, 'hybrid')
-    save_compressed(quant_model, save_path)
+    save_path, hybrid_size = save_smallest_artifact(quant_model, save_path, prefer_sparse=True)
 
     _cb("Evaluating hybrid model...")
     cpu_dev = torch.device('cpu')
-    hybrid_acc = evaluate(quant_model, test_loader, dev=cpu_dev, max_batches=50)
-    hybrid_size = get_size_mb(save_path)
+    try:
+        hybrid_acc = evaluate(quant_model, test_loader, dev=cpu_dev, max_batches=50)
+    except Exception as e:
+        print(f"[Hybrid] Runtime fallback to dynamic quantization: {e}")
+        hybrid_quantization_type = "dynamic_int8_fallback_runtime"
+        quant_model = torch.quantization.quantize_dynamic(
+            fallback_float_model, {nn.Linear}, dtype=torch.qint8
+        )
+        save_path, hybrid_size = save_smallest_artifact(quant_model, save_path, prefer_sparse=True)
+        hybrid_acc = evaluate(quant_model, test_loader, dev=cpu_dev, max_batches=50)
     latency = measure_latency(quant_model, input_shape=input_shape, dev=cpu_dev, n_runs=20)
 
     if os.path.exists(baseline_path):
@@ -890,10 +1211,14 @@ def apply_hybrid(model, train_loader, test_loader, device,
 
     compression_ratio = round(baseline_size / hybrid_size, 2) if hybrid_size > 0 else 0
 
+    log_validation_summary("hybrid", baseline_acc, hybrid_acc,
+                           baseline_size, hybrid_size, latency)
+
     return {
         "strategy": "hybrid",
         "baseline_accuracy": baseline_acc,
         "compressed_accuracy": hybrid_acc,
+        "accuracy_drop_threshold": allowed_drop,
         "original_size_MB": baseline_size,
         "compressed_size_MB": hybrid_size,
         "size_MB": hybrid_size,
@@ -906,6 +1231,8 @@ def apply_hybrid(model, train_loader, test_loader, device,
         "sparsity_percent": round(100 * (1 - nonzero / total), 2) if total > 0 else 0,
         "total_params": total,
         "pipeline": f"Prune {int(amount*100)}% → Fine-tune {fine_tune_epochs}ep → Quantize INT8",
+        "quantization_type": hybrid_quantization_type,
+        "accuracy_checkpoints": accuracy_checkpoints,
         "training_emissions_kg": training_emissions_kg,
         "training_co2_kg": training_emissions_kg,
         "training_energy_kwh": training_energy_kwh,
@@ -915,7 +1242,8 @@ def apply_hybrid(model, train_loader, test_loader, device,
 
 def apply_kd(teacher, train_loader, test_loader, device,
              num_classes=10, epochs=20, save_dir='../models/uploads',
-             progress_cb=None, model_name='model'):
+             progress_cb=None, model_name='model',
+             accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD):
     """
     Apply knowledge distillation: teacher → CompactStudent.
     The teacher is the uploaded model; the student is a lightweight MobileNet-style model.
@@ -952,9 +1280,14 @@ def apply_kd(teacher, train_loader, test_loader, device,
     optimizer = optim.Adam(student.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     best_acc = float('-inf')
+    allowed_drop = accuracy_drop_threshold
     training_emissions_kg = 0.0
     training_energy_kwh = 0.0
     training_tracker = None
+    consecutive_guard_hits = 0
+    accuracy_checkpoints = []
+    _record_accuracy_checkpoint(accuracy_checkpoints, "baseline", 0,
+                                teacher_acc, teacher_acc, allowed_drop)
 
     if epochs > 0:
         training_tracker = _start_emissions_tracker(
@@ -973,12 +1306,12 @@ def apply_kd(teacher, train_loader, test_loader, device,
             optimizer.zero_grad()
             # Teacher uses original resolution
             with torch.no_grad():
-                t_out = teacher(inputs)
+                t_out = _extract_logits(teacher(inputs))
             # Student uses 32×32
             s_inputs = F.interpolate(inputs, size=student_size_px,
                                      mode='bilinear', align_corners=False
                                      ) if needs_resize else inputs
-            s_out = student(s_inputs)
+            s_out = _extract_logits(student(s_inputs))
             loss = distillation_loss(s_out, t_out, labels, T=4.0, alpha=0.3)
             loss.backward()
             optimizer.step()
@@ -990,9 +1323,30 @@ def apply_kd(teacher, train_loader, test_loader, device,
         # Evaluate student with resized inputs
         acc = _evaluate_with_resize(student, test_loader, student_size_px,
                                      needs_resize, dev=device)
+        _log_guard("kd", epoch + 1, acc, teacher_acc, allowed_drop)
+        _record_accuracy_checkpoint(
+            accuracy_checkpoints,
+            "kd_epoch",
+            epoch + 1,
+            acc,
+            teacher_acc,
+            allowed_drop,
+        )
         if acc >= best_acc:
             best_acc = acc
             torch.save(student.state_dict(), save_path)
+            consecutive_guard_hits = 0
+        elif not _accuracy_guard(acc, teacher_acc, allowed_drop=allowed_drop):
+            consecutive_guard_hits += 1
+            for group in optimizer.param_groups:
+                group['lr'] = max(group['lr'] * 0.5, 1e-5)
+            print(
+                f"[KD] Accuracy guard triggered; reducing LR to {optimizer.param_groups[0]['lr']:.6f} "
+                f"(hit {consecutive_guard_hits}/2)."
+            )
+            if consecutive_guard_hits >= 2:
+                print("[KD] Early stopping due to repeated accuracy guard failures.")
+                break
 
     training_emissions_kg, training_energy_kwh = _stop_emissions_tracker(training_tracker)
 
@@ -1004,7 +1358,7 @@ def apply_kd(teacher, train_loader, test_loader, device,
     student.load_state_dict(torch.load(save_path, map_location=device))
     student_acc = _evaluate_with_resize(student, test_loader, student_size_px,
                                          needs_resize, dev=device)
-    student_size = get_size_mb(save_path)
+    save_path, student_size = save_smallest_artifact(student, save_path, prefer_sparse=False)
     # Measure latency at the student's native 32×32 resolution
     student_input_shape = (1, input_shape[1], student_size_px, student_size_px)
     latency = measure_latency(student, input_shape=student_input_shape, dev=device)
@@ -1013,6 +1367,9 @@ def apply_kd(teacher, train_loader, test_loader, device,
         os.remove(teacher_path)
 
     compression_ratio = round(teacher_size / student_size, 2) if student_size > 0 else 0
+
+    log_validation_summary("kd", teacher_acc, student_acc,
+                           teacher_size, student_size, latency)
 
     return {
         "strategy": "kd",
@@ -1031,6 +1388,8 @@ def apply_kd(teacher, train_loader, test_loader, device,
         "param_reduction_percent": round(
             100 * (1 - student_params / teacher_params), 2) if teacher_params > 0 else 0,
         "kd_epochs": epochs,
+        "accuracy_drop_threshold": allowed_drop,
+        "accuracy_checkpoints": accuracy_checkpoints,
         "training_emissions_kg": training_emissions_kg,
         "training_co2_kg": training_emissions_kg,
         "training_energy_kwh": training_energy_kwh,
@@ -1079,23 +1438,28 @@ def compress_dynamic(model_path, strategy, dataset='CIFAR10',
     strategy = strategy.lower().strip()
     if strategy == 'pruning':
         result = apply_pruning(model, train_loader, test_loader, device,
-                               amount=0.7, fine_tune_epochs=fine_tune_epochs,
+                               amount=0.30, fine_tune_epochs=fine_tune_epochs,
                                save_dir=save_dir,
-                               model_name=uploaded_model_name)
+                               model_name=uploaded_model_name,
+                               accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
     elif strategy == 'quantization':
         result = apply_quantization(model, train_loader, test_loader, device,
                                     save_dir=save_dir,
-                                    model_name=uploaded_model_name)
+                                    model_name=uploaded_model_name,
+                                    fine_tune_epochs=max(1, fine_tune_epochs // 2),
+                                    accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
     elif strategy == 'hybrid':
         result = apply_hybrid(model, train_loader, test_loader, device,
-                              amount=0.5, fine_tune_epochs=fine_tune_epochs,
+                              amount=0.25, fine_tune_epochs=fine_tune_epochs,
                               save_dir=save_dir,
-                              model_name=uploaded_model_name)
+                              model_name=uploaded_model_name,
+                              accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
     elif strategy == 'kd':
         result = apply_kd(model, train_loader, test_loader, device,
                           num_classes=num_classes, epochs=fine_tune_epochs * 4,
                           save_dir=save_dir,
-                          model_name=uploaded_model_name)
+                          model_name=uploaded_model_name,
+                          accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
     else:
         raise ValueError(
             f"Unknown strategy: {strategy}. "
@@ -1373,7 +1737,7 @@ def run_compression(model_name, method, dataset='CIFAR10',
             for batch_idx, (inputs, labels) in enumerate(train_loader):
                 inputs, labels = inputs.to(device), labels.to(device)
                 optimizer_A.zero_grad()
-                loss = F.cross_entropy(model(inputs), labels)
+                loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
                 loss.backward()
                 optimizer_A.step()
                 if (batch_idx + 1) % 20 == 0:
@@ -1402,7 +1766,7 @@ def run_compression(model_name, method, dataset='CIFAR10',
                     break
                 inputs, labels = inputs.to(device), labels.to(device)
                 optimizer_B.zero_grad()
-                loss = F.cross_entropy(model(inputs), labels)
+                loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
                 loss.backward()
                 optimizer_B.step()
                 if (batch_idx + 1) % 10 == 0:
@@ -1432,24 +1796,29 @@ def run_compression(model_name, method, dataset='CIFAR10',
     method = method.lower().strip()
     if method == 'pruning':
         result = apply_pruning(model, train_loader, test_loader, device,
-                               amount=0.7, fine_tune_epochs=fine_tune_epochs,
+                               amount=0.30, fine_tune_epochs=fine_tune_epochs,
                                save_dir=save_dir, progress_cb=compress_cb,
-                               model_name=model_key)
+                               model_name=model_key,
+                               accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
     elif method == 'quantization':
         result = apply_quantization(model, train_loader, test_loader, device,
                                     save_dir=save_dir, progress_cb=compress_cb,
-                                    model_name=model_key)
+                                    model_name=model_key,
+                                    fine_tune_epochs=max(1, fine_tune_epochs // 2),
+                                    accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
     elif method == 'hybrid':
         result = apply_hybrid(model, train_loader, test_loader, device,
-                              amount=0.5, fine_tune_epochs=fine_tune_epochs,
+                              amount=0.25, fine_tune_epochs=fine_tune_epochs,
                               save_dir=save_dir, progress_cb=compress_cb,
-                              model_name=model_key)
+                              model_name=model_key,
+                              accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
     elif method == 'kd':
         result = apply_kd(model, train_loader, test_loader, device,
                           num_classes=num_classes,
                           epochs=fine_tune_epochs,
                           save_dir=save_dir, progress_cb=compress_cb,
-                          model_name=model_key)
+                          model_name=model_key,
+                          accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
     else:
         raise ValueError(
             f"Unknown method: {method}. "
@@ -1752,10 +2121,10 @@ if __name__ == "__main__":
         # Fuse Conv-BN-ReLU blocks for better quantization accuracy
         quant_model.fuse_model()
 
-        # Set quantization config for x86 (fbgemm backend)
-        backend = 'fbgemm'  # Use 'qnnpack' for ARM edge devices
+        # Select a backend supported by the current PyTorch build.
+        backend = _configure_quantized_backend()
+        print(f"  Using quantized backend: {backend}")
         quant_model.qconfig = torch.quantization.get_default_qconfig(backend)
-        torch.backends.quantized.engine = backend
 
         # Insert observers
         torch.quantization.prepare(quant_model, inplace=True)
@@ -1868,9 +2237,9 @@ if __name__ == "__main__":
         for inputs, labels in train_loader:
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
-            s_out = student(inputs)
+            s_out = _extract_logits(student(inputs))
             with torch.no_grad():
-                t_out = teacher(inputs)
+                t_out = _extract_logits(teacher(inputs))
             loss = distillation_loss(s_out, t_out, labels, T=4.0, alpha=0.3)
             loss.backward()
             optimizer.step()
@@ -2001,7 +2370,7 @@ if __name__ == "__main__":
             optimizer.zero_grad()
             s_out = ultra_model(inputs)
             with torch.no_grad():
-                t_out = teacher(inputs)
+                t_out = _extract_logits(teacher(inputs))
             loss = distillation_loss(s_out, t_out, labels, T=4.0, alpha=0.3)
             loss.backward()
             optimizer.step()

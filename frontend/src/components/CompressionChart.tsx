@@ -13,7 +13,7 @@ interface ChartProps {
   modelName?: string;
 }
 
-type ChartView = 'size' | 'accuracy' | 'radar';
+type ChartView = 'size' | 'accuracy' | 'carbon' | 'radar';
 
 export function CompressionChart({ strategies, modelName }: ChartProps) {
   const [view, setView] = useState<ChartView>('size');
