@@ -56,3 +56,28 @@ body {
 .btn-danger {
   @apply btn bg-red-50 text-red-600 hover:bg-red-100;
 }
+
+/* CIFAR image helpers: upscale 32x32 samples smoothly for clearer visual inspection */
+.cifar-pixelated {
+  image-rendering: auto;
+  image-rendering: smooth;
+  -ms-interpolation-mode: bicubic;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+  width: 100%;
+  height: 100%;
+}
+
+.cifar-zoom-wrap {
+  overflow: hidden;
+  border-radius: 0.5rem;
+}
+
+.cifar-zoom-wrap img {
+  transform-origin: center;
+  transition: transform 180ms ease-out;
+}
+
+.cifar-zoom-wrap:hover img {
+  transform: scale(1.18);
+}

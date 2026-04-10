@@ -15,6 +15,12 @@ const STRATEGY_LABELS: Record<string, string> = {
   kd: 'Knowledge Distillation',
 };
 
+function formatCo2(value: number): string {
+  if (!Number.isFinite(value)) return 'Not Available';
+  if (value > 0 && value < 0.000001) return '<0.000001 kg';
+  return `${value.toFixed(6)} kg`;
+}
+
 export function DynamicResults({ results, onClear }: DynamicResultsProps) {
   const [expandedIdx, setExpandedIdx] = useState<number | null>(
     results.length > 0 ? results.length - 1 : null
@@ -101,7 +107,7 @@ export function DynamicResults({ results, onClear }: DynamicResultsProps) {
                       value={`${result.size_MB} MB`}
                       sub={`from ${result.baseline_size_MB} MB`}
                     />
-                    <MiniMetric label="Latency" value={`${result.latency_ms} ms`} />
+                    {/* <MiniMetric label="Latency" value={`${result.latency_ms} ms`} /> */}
                   </div>
 
                   {/* Size comparison bar */}
@@ -142,10 +148,10 @@ export function DynamicResults({ results, onClear }: DynamicResultsProps) {
                         <DetailRow label="FLOPs" value={`${result.flops_M} M`} />
                       )}
                       {trainingCo2 != null && (
-                        <DetailRow label="Train CO₂" value={`${trainingCo2.toFixed(6)} kg`} />
+                        <DetailRow label="Train CO₂" value={formatCo2(trainingCo2)} />
                       )}
                       {inferenceCo2 != null && (
-                        <DetailRow label="Infer CO₂" value={`${inferenceCo2.toFixed(6)} kg`} />
+                        <DetailRow label="Infer CO₂" value={formatCo2(inferenceCo2)} />
                       )}
                       {result.training_energy_kwh != null && (
                         <DetailRow label="Train Energy" value={`${result.training_energy_kwh.toFixed(8)} kWh`} />

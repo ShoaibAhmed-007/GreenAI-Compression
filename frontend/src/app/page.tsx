@@ -1,9 +1,11 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
 import {
   DashboardData, DynamicResult, BaselinesResponse, Strategy,
-  fetchAPI, getBaselines, clearSavedResults,
+  fetchAPI, getBaselines, clearSavedResults, loadSavedResults,
+  saveResult, deleteSavedResultByKey, getResultStorageKey,
   dynamicResultToStrategy,
 } from '@/lib/api';
 import { StatsCards } from '@/components/StatsCards';
@@ -56,9 +58,8 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    // Force clean dashboard sections on load; only new run results are kept in memory.
-    setSavedResults([]);
-    clearSavedResults();
+    // Load persisted compression history on page startup.
+    setSavedResults(loadSavedResults());
     loadData();
     const interval = setInterval(loadData, 15000);
     return () => clearInterval(interval);
@@ -70,15 +71,14 @@ export default function Home() {
       strategy: result.strategy,
     });
 
-    setSavedResults((prev) => {
-      const newKey = `${normalizeModelKey(result)}_${result.strategy || result.compression_method || 'unknown'}`;
-      const filtered = prev.filter((r) => {
-        const existingKey = `${normalizeModelKey(r)}_${r.strategy || r.compression_method || 'unknown'}`;
-        return existingKey !== newKey;
-      });
-      return [...filtered, result];
-    });
-  }, [normalizeModelKey]);
+    const updated = saveResult(result);
+    setSavedResults(updated);
+  }, []);
+
+  const handleDeleteResult = useCallback((resultKey: string) => {
+    const updated = deleteSavedResultByKey(resultKey);
+    setSavedResults(updated);
+  }, []);
 
   const handleResetSessionResults = useCallback(() => {
     setSavedResults([]);
@@ -151,18 +151,26 @@ export default function Home() {
   let chartStrategies: Strategy[] = [];
   if (selectedModel && baselines?.models[selectedModel]) {
     const baselineModel = baselines.models[selectedModel];
+    const baselineTrainingCo2 =
+      typeof baselineModel.training_co2_kg === 'number'
+        ? baselineModel.training_co2_kg
+        : undefined;
+    const baselineTrainingEnergy =
+      typeof baselineModel.training_energy_kwh === 'number'
+        ? baselineModel.training_energy_kwh
+        : undefined;
     const baselineStrategy: Strategy = {
       key: 'baseline',
       name: `${baselineModel.model_name} · Baseline`,
       accuracy: baselineModel.accuracy || 0,
       size_MB: baselineModel.size_MB || 0,
       size_reduction: 0,
-      latency_ms: baselineModel.latency_ms || 0,
+      // latency_ms: baselineModel.latency_ms || 0,
       params: baselineModel.total_params || 0,
-      co2_kg: undefined,
-      training_co2_kg: undefined,
+      co2_kg: baselineTrainingCo2,
+      training_co2_kg: baselineTrainingCo2,
       inference_co2_kg: undefined,
-      training_energy_kwh: undefined,
+      training_energy_kwh: baselineTrainingEnergy,
       inference_energy_kwh: undefined,
       flops_M: undefined,
       sparsity_percent: undefined,
@@ -180,7 +188,10 @@ export default function Home() {
   }
 
   // --- Table data: ALL accumulated results across all models ---
-  const allStrategies = savedResults.map(dynamicResultToStrategy);
+  const allStrategies = savedResults.map((result) => ({
+    ...dynamicResultToStrategy(result),
+    key: getResultStorageKey(result),
+  }));
 
   // Stats: pick best across all results
   const bestStrategy = allStrategies.length > 0
@@ -210,7 +221,13 @@ export default function Home() {
         dynamicCount={savedResults.length}
       />
 
-      <div className="flex justify-end">
+      <div className="flex flex-wrap justify-end gap-2">
+        <Link
+          href="/model-comparison"
+          className="btn-primary"
+        >
+          Compare Models on Images
+        </Link>
         <button
           onClick={handleResetSessionResults}
           disabled={savedResults.length === 0}
@@ -262,11 +279,19 @@ export default function Home() {
             ? baselines.models[selectedModel].model_name
             : undefined}
         />
-        <ComparisonTable strategies={allStrategies} />
+        <ComparisonTable
+          strategies={allStrategies}
+          onDeleteStrategy={handleDeleteResult}
+        />
       </div>
 
       {/* Energy */}
-      <EnergySection energy={{}} savedResults={savedResults} />
+      <EnergySection
+        energy={data.energy || {}}
+        savedResults={savedResults}
+        baselines={baselines?.models || {}}
+        onDeleteResult={handleDeleteResult}
+      />
     </div>
   );
 }

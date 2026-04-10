@@ -1,16 +1,89 @@
 'use client';
 
-import { DynamicResult } from '@/lib/api';
+import { BaselineModel, DynamicResult, getResultStorageKey } from '@/lib/api';
 
 interface EnergySectionProps {
   energy: Record<string, any>;
   savedResults?: DynamicResult[];
+  baselines?: Record<string, BaselineModel>;
+  onDeleteResult?: (resultKey: string) => void;
 }
 
-export function EnergySection({ energy, savedResults = [] }: EnergySectionProps) {
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function normalizeModelKey(value?: string): string {
+  return (value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '_')
+    .replace(/-/g, '_');
+}
+
+function formatCo2(value: number | null): string {
+  if (value == null) return 'Not Available';
+  if (value > 0 && value < 0.000001) return '<0.000001 kg';
+  return `${value.toFixed(6)} kg`;
+}
+
+function formatEnergy(value: number | null): string {
+  return value == null ? 'Not Available' : `${value.toFixed(8)} kWh`;
+}
+
+export function EnergySection({
+  energy,
+  savedResults = [],
+  baselines = {},
+  onDeleteResult,
+}: EnergySectionProps) {
   const hasSavings = energy && Object.keys(energy).length > 0;
-  const hasResults = savedResults.length > 0;
-  const showSection = hasSavings || hasResults;
+  const dedupedResults = Object.values(
+    savedResults.reduce((acc, result) => {
+      const key = getResultStorageKey(result);
+      acc[key] = result;
+      return acc;
+    }, {} as Record<string, DynamicResult>)
+  );
+
+  const comparisonRows = dedupedResults
+    .filter((result) => (result.strategy || '').toLowerCase() !== 'baseline')
+    .map((result) => {
+      const modelKey = normalizeModelKey(result.model_key || result.model_name);
+      const baseline = baselines[modelKey];
+
+      const baselineCo2 = toFiniteNumber(baseline?.training_co2_kg);
+      const compressedTrainCo2 = toFiniteNumber(result.training_co2_kg ?? result.training_emissions_kg);
+      const compressedInferCo2 = toFiniteNumber(
+        result.inference_co2_kg ?? result.inference_emissions_kg ?? result.emissions_kg
+      );
+      const compressedCo2 = compressedTrainCo2 ?? compressedInferCo2;
+
+      const reductionPercent =
+        baselineCo2 != null && baselineCo2 > 0 && compressedCo2 != null
+          ? ((baselineCo2 - compressedCo2) / baselineCo2) * 100
+          : null;
+
+      return {
+        key: getResultStorageKey(result),
+        label: `${result.model_name || result.model_key || 'Model'} · ${result.compression_method || result.strategy}`,
+        baselineCo2,
+        compressedCo2,
+        compressedTrainCo2,
+        compressedInferCo2,
+        reductionPercent,
+      };
+    });
+
+  const hasComparisons = comparisonRows.length > 0;
+  const showSection = hasSavings || hasComparisons;
 
   return (
     <div className="card">
@@ -37,34 +110,73 @@ export function EnergySection({ energy, savedResults = [] }: EnergySectionProps)
         </div>
       ) : (
         <div className="space-y-3">
-          {/* Dynamic compression emissions */}
-          {hasResults && (
+          {/* Baseline vs compressed CO2 */}
+          {hasComparisons && (
             <>
-              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Compression Results</p>
-              {savedResults.map((r, i) => {
-                const label = `${r.model_name || r.model_key || 'Model'} · ${r.compression_method || r.strategy}`;
-                const trainingCo2 = r.training_co2_kg ?? r.training_emissions_kg;
-                const inferenceCo2 = r.inference_co2_kg ?? r.inference_emissions_kg ?? r.emissions_kg;
-                const inferenceEnergy = r.inference_energy_kwh ?? r.energy_kwh;
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                Baseline vs Compressed CO2
+              </p>
+              {comparisonRows.map((row) => {
+                const reductionText =
+                  row.reductionPercent == null
+                    ? 'Not Available'
+                    : `${row.reductionPercent.toFixed(2)}%`;
+
+                const reductionTone =
+                  row.reductionPercent == null
+                    ? 'text-gray-500'
+                    : row.reductionPercent > 0
+                      ? 'text-green-600'
+                      : row.reductionPercent < 0
+                        ? 'text-red-600'
+                        : 'text-gray-600';
+
                 return (
-                  <div key={i} className="bg-gray-50 rounded-lg p-3 flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-700">{label}</p>
-                      <p className="text-xs text-gray-500 mt-0.5">
-                        {trainingCo2 != null ? `Train CO₂: ${trainingCo2.toFixed(6)} kg` : 'Train CO₂: —'}
-                      </p>
-                      <p className="text-xs text-gray-500 mt-0.5">
-                        {inferenceCo2 != null ? `Infer CO₂: ${inferenceCo2.toFixed(6)} kg` : 'Infer CO₂: —'}
-                      </p>
-                      <p className="text-xs text-gray-500 mt-0.5">
-                        {inferenceEnergy != null ? `Infer Energy: ${inferenceEnergy.toFixed(8)} kWh` : 'Infer Energy: —'}
-                      </p>
+                  <div key={row.key} className="bg-gray-50 rounded-lg p-4 border border-gray-100">
+                    <div className="flex items-start justify-between gap-3 mb-3">
+                      <p className="text-sm font-medium text-gray-700">{row.label}</p>
+                      <div className="flex items-start gap-2">
+                        <div className="text-right">
+                          <p className={`text-lg font-bold ${reductionTone}`}>{reductionText}</p>
+                          <p className="text-xs text-gray-500">CO2 reduction</p>
+                        </div>
+                        {onDeleteResult && (
+                          <button
+                            type="button"
+                            onClick={() => onDeleteResult(row.key)}
+                            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+                            title="Delete this saved result"
+                            aria-label="Delete this saved result"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <div className="text-right">
-                      <span className="text-lg font-bold text-green-600">
-                        {r.size_reduction_percent?.toFixed(1)}%
-                      </span>
-                      <p className="text-xs text-green-600">size ↓</p>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-gray-500">Baseline CO2</p>
+                        <p className="text-sm font-semibold text-gray-800 mt-1">{formatCo2(row.baselineCo2)}</p>
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-gray-500">Compressed CO2</p>
+                        <p className="text-sm font-semibold text-gray-800 mt-1">{formatCo2(row.compressedCo2)}</p>
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-gray-500">Compressed Train / Infer</p>
+                        <p className="text-sm font-semibold text-gray-800 mt-1">
+                          {`${formatCo2(row.compressedTrainCo2)} / ${formatCo2(row.compressedInferCo2)}`}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="text-[11px] text-gray-500 mt-2">
+                        Baseline uses training-result CO2; compressed uses training CO2 when available, otherwise inference CO2.
+                      </p>
                     </div>
                   </div>
                 );
@@ -75,7 +187,7 @@ export function EnergySection({ energy, savedResults = [] }: EnergySectionProps)
           {/* Original energy tracking data */}
           {hasSavings && (
             <>
-              {hasResults && (
+              {hasComparisons && (
                 <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mt-4">
                   Baseline Energy Tracking
                 </p>
@@ -104,13 +216,13 @@ export function EnergySection({ energy, savedResults = [] }: EnergySectionProps)
                         <div>
                           <p className="text-xs text-green-600">Baseline</p>
                           <p className="text-sm font-mono text-green-800">
-                            {data.baseline_energy_kWh?.toFixed(6)} kWh
+                            {formatEnergy(toFiniteNumber(data.baseline_energy_kWh))}
                           </p>
                         </div>
                         <div>
                           <p className="text-xs text-green-600">Student</p>
                           <p className="text-sm font-mono text-green-800">
-                            {data.student_energy_kWh?.toFixed(6)} kWh
+                            {formatEnergy(toFiniteNumber(data.student_energy_kWh))}
                           </p>
                         </div>
                       </div>
@@ -125,9 +237,7 @@ export function EnergySection({ energy, savedResults = [] }: EnergySectionProps)
                         {key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
                       </p>
                       <p className="text-xs text-gray-500 mt-0.5">
-                        {data.inference_energy_kWh !== undefined
-                          ? `Energy: ${data.inference_energy_kWh.toFixed(8)} kWh`
-                          : ''}
+                        {`Energy: ${formatEnergy(toFiniteNumber(data.inference_energy_kWh))}`}
                       </p>
                     </div>
                     <div className="text-right">

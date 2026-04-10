@@ -4,9 +4,16 @@ import { Strategy } from '@/lib/api';
 
 interface ComparisonTableProps {
   strategies: Strategy[];
+  onDeleteStrategy?: (strategyKey: string) => void;
 }
 
-export function ComparisonTable({ strategies }: ComparisonTableProps) {
+function formatCo2(value: number | undefined): string {
+  if (value == null || !Number.isFinite(value)) return 'Not Available';
+  if (value > 0 && value < 0.000001) return '<0.000001 kg';
+  return `${value.toFixed(6)} kg`;
+}
+
+export function ComparisonTable({ strategies, onDeleteStrategy }: ComparisonTableProps) {
   if (!strategies.length) {
     return (
       <div className="card">
@@ -37,9 +44,12 @@ export function ComparisonTable({ strategies }: ComparisonTableProps) {
               <th className="text-right py-3 px-4 font-medium text-gray-600">Acc%</th>
               <th className="text-right py-3 px-4 font-medium text-gray-600">Size</th>
               <th className="text-right py-3 px-4 font-medium text-gray-600">↓ Size</th>
-              <th className="text-right py-3 px-4 font-medium text-gray-600">Latency</th>
+              {/* <th className="text-right py-3 px-4 font-medium text-gray-600">Latency</th> */}
               <th className="text-right py-3 px-4 font-medium text-gray-600">Train CO₂</th>
               <th className="text-right py-3 px-4 font-medium text-gray-600">Infer CO₂</th>
+              {onDeleteStrategy && (
+                <th className="text-center py-3 px-4 font-medium text-gray-600">Delete</th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -84,19 +94,32 @@ export function ComparisonTable({ strategies }: ComparisonTableProps) {
                       </span>
                     )}
                   </td>
-                  <td className="py-3 px-4 text-right font-mono text-gray-700">
+                  {/* <td className="py-3 px-4 text-right font-mono text-gray-700">
                     {s.latency_ms} ms
-                  </td>
+                  </td> */}
                   <td className="py-3 px-4 text-right font-mono text-gray-700">
-                    {s.training_co2_kg != null ? `${s.training_co2_kg.toFixed(6)} kg` : '—'}
+                    {formatCo2(s.training_co2_kg)}
                   </td>
                   <td className="py-3 px-4 text-right font-mono text-gray-700">
                     {s.inference_co2_kg != null
-                      ? `${s.inference_co2_kg.toFixed(6)} kg`
+                      ? formatCo2(s.inference_co2_kg)
                       : s.co2_kg != null
-                        ? `${s.co2_kg.toFixed(6)} kg`
-                        : '—'}
+                        ? formatCo2(s.co2_kg)
+                        : 'Not Available'}
                   </td>
+                  {onDeleteStrategy && (
+                    <td className="py-3 px-4 text-center">
+                      <button
+                        type="button"
+                        onClick={() => onDeleteStrategy(s.key)}
+                        className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+                        title="Delete this saved result"
+                        aria-label="Delete this saved result"
+                      >
+                        ×
+                      </button>
+                    </td>
+                  )}
                 </tr>
               );
             })}

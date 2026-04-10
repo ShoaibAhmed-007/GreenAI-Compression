@@ -33,6 +33,13 @@ interface ModelGridProps {
   compressionCounts: Record<string, number>;
 }
 
+function formatCo2(value?: number | null): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 'Not Available';
+  }
+  return `${value.toFixed(6)} kg`;
+}
+
 export function ModelGrid({ models, selectedModel, onSelectModel, compressionCounts }: ModelGridProps) {
   const modelKeys = Object.keys(models);
 
@@ -101,17 +108,29 @@ export function ModelGrid({ models, selectedModel, onSelectModel, compressionCou
               <p className="text-xs text-gray-400 mt-0.5">{m.params_label} params</p>
 
               {/* Metrics (if ready) */}
-              {isReady && m.accuracy != null && (
-                <div className="mt-2 pt-2 border-t border-gray-100 grid grid-cols-2 gap-1">
-                  <div>
-                    <p className="text-[10px] text-gray-400">Accuracy</p>
-                    <p className="text-xs font-bold text-green-700">{m.accuracy}%</p>
+              {isReady && (
+                <>
+                  <div className="mt-2 pt-2 border-t border-gray-100 grid grid-cols-2 gap-1">
+                    <div>
+                      <p className="text-[10px] text-gray-400">Accuracy</p>
+                      <p className="text-xs font-bold text-green-700">
+                        {m.accuracy != null ? `${m.accuracy}%` : 'Not Available'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-gray-400">Size</p>
+                      <p className="text-xs font-bold text-gray-700">
+                        {m.size_MB != null ? `${m.size_MB} MB` : 'Not Available'}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-[10px] text-gray-400">Size</p>
-                    <p className="text-xs font-bold text-gray-700">{m.size_MB} MB</p>
+                  <div className="mt-2 pt-2 border-t border-gray-100">
+                    <p className="text-[10px] text-gray-400">Training CO2</p>
+                    <p className="text-xs font-bold text-emerald-700">
+                      {formatCo2(m.training_co2_kg)}
+                    </p>
                   </div>
-                </div>
+                </>
               )}
 
               {/* Not ready prompt */}

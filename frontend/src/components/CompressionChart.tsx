@@ -13,16 +13,36 @@ interface ChartProps {
   modelName?: string;
 }
 
-type ChartView = 'size' | 'accuracy' | 'carbon' | 'radar';
+type ChartView = 'size' | 'carbon' | 'radar';
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function strategyTrainingCo2(strategy: Strategy): number | null {
+  return toFiniteNumber(strategy.training_co2_kg ?? strategy.co2_kg);
+}
+
+function strategyCompressedCo2(strategy: Strategy): number | null {
+  return toFiniteNumber(strategy.training_co2_kg ?? strategy.co2_kg ?? strategy.inference_co2_kg);
+}
+
+function formatCo2Value(value: unknown): string {
+  const numeric = toFiniteNumber(value);
+  if (numeric == null) return 'Not Available';
+  if (numeric > 0 && numeric < 0.000001) return '<0.000001 kg';
+  return `${numeric.toFixed(6)} kg`;
+}
 
 export function CompressionChart({ strategies, modelName }: ChartProps) {
   const [view, setView] = useState<ChartView>('size');
-
-  // Prepare carbon emissions data
-  const carbonData = strategies.map(s => ({
-    name: s.name.replace(/[→·]/g, '').substring(0, 20),
-    'CO₂ (kg)': typeof s.co2_kg === 'number' ? s.co2_kg : 0,
-  }));
 
   const title = modelName
     ? `Compression Analysis — ${modelName}`
@@ -55,24 +75,29 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
     'Reduction (%)': s.size_reduction,
   }));
 
-  const accLatData = strategies.map(s => ({
-    name: s.name.replace(/[→·]/g, '').substring(0, 20),
-    'Accuracy (%)': s.accuracy,
-    'Latency (ms)': s.latency_ms,
+  const baseline = strategies.find(s => s.key === 'baseline');
+  const baselineCo2 = baseline ? strategyTrainingCo2(baseline) : null;
+  const compressedOnly = strategies.filter(s => s.key !== 'baseline');
+  const carbonRows = compressedOnly.length > 0 ? compressedOnly : strategies;
+
+  const carbonData = carbonRows.map((s) => ({
+    name: s.name.replace(/[→·]/g, '').substring(0, 24),
+    'Baseline CO₂ (kg)': baselineCo2,
+    'Compressed CO₂ (kg)': s.key === 'baseline' ? baselineCo2 : strategyCompressedCo2(s),
   }));
 
-  const baseline = strategies.find(s => s.key === 'baseline');
+  const hasCarbonValues = carbonData.some((row) =>
+    row['Baseline CO₂ (kg)'] != null || row['Compressed CO₂ (kg)'] != null
+  );
+
   const radarData = strategies
     .filter(s => s.key !== 'baseline')
     .map(s => {
       const bAcc = baseline?.accuracy || 1;
-      const bSize = baseline?.size_MB || 1;
-      const bLat = baseline?.latency_ms || 1;
       return {
         name: s.name.replace(/[→·]/g, '').substring(0, 18),
         Accuracy: Math.round((s.accuracy / bAcc) * 100),
         'Size Reduction': Math.round(s.size_reduction),
-        'Speed': Math.round((bLat / Math.max(s.latency_ms, 0.1)) * 100),
       };
     });
 
@@ -85,7 +110,6 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
         <div className="flex gap-1">
           {[
             { key: 'size' as ChartView, label: 'Size' },
-            { key: 'accuracy' as ChartView, label: 'Acc/Lat' },
             { key: 'carbon' as ChartView, label: 'CO₂ Emissions' },
             { key: 'radar' as ChartView, label: 'Radar' },
           ].map(tab => (
@@ -105,49 +129,52 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
       </div>
 
       <div className="h-72">
-        <ResponsiveContainer width="100%" height="100%">
-          {view === 'size' ? (
-            <BarChart data={sizeData} margin={{ top: 5, right: 20, left: 0, bottom: 60 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-              <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-35} textAnchor="end" />
-              <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip />
-              <Legend />
-              <Bar dataKey="Size (MB)" fill="#22c55e" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          ) : view === 'accuracy' ? (
-            <BarChart data={accLatData} margin={{ top: 5, right: 20, left: 0, bottom: 60 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-              <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-35} textAnchor="end" />
-              <YAxis yAxisId="left" tick={{ fontSize: 11 }} domain={['auto', 'auto']} />
-              <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} />
-              <Tooltip />
-              <Legend />
-              <Bar yAxisId="left" dataKey="Accuracy (%)" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-              <Bar yAxisId="right" dataKey="Latency (ms)" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          ) : view === 'carbon' ? (
-            <BarChart data={carbonData} margin={{ top: 5, right: 20, left: 0, bottom: 60 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-              <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-35} textAnchor="end" />
-              <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip formatter={(value) => `${value} kg CO₂`} />
-              <Legend />
-              <Bar dataKey="CO₂ (kg)" fill="#6366f1" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          ) : (
-            <RadarChart data={radarData} cx="50%" cy="50%" outerRadius="70%">
-              <PolarGrid />
-              <PolarAngleAxis dataKey="name" tick={{ fontSize: 10 }} />
-              <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fontSize: 9 }} />
-              <Radar name="Accuracy" dataKey="Accuracy" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.15} />
-              <Radar name="Size Reduction" dataKey="Size Reduction" stroke="#22c55e" fill="#22c55e" fillOpacity={0.15} />
-              <Radar name="Speed" dataKey="Speed" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.15} />
-              <Legend />
-              <Tooltip />
-            </RadarChart>
-          )}
-        </ResponsiveContainer>
+        {view === 'carbon' && !hasCarbonValues ? (
+          <div className="h-full flex items-center justify-center text-center bg-gray-50 rounded-lg">
+            <div>
+              <p className="text-sm text-gray-500">CO₂ data not available yet</p>
+              <p className="text-xs text-gray-400 mt-1">
+                Baseline and compressed emissions will appear after valid results are loaded.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%">
+            {view === 'size' ? (
+              <BarChart data={sizeData} margin={{ top: 5, right: 20, left: 0, bottom: 60 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-35} textAnchor="end" />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip />
+                <Legend />
+                <Bar dataKey="Size (MB)" fill="#22c55e" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            ) : view === 'carbon' ? (
+              <BarChart data={carbonData} margin={{ top: 5, right: 20, left: 10, bottom: 60 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-35} textAnchor="end" />
+                <YAxis
+                  tick={{ fontSize: 11 }}
+                  label={{ value: 'CO₂ emissions (kg)', angle: -90, position: 'insideLeft' }}
+                />
+                <Tooltip formatter={(value, name) => [formatCo2Value(value), name]} />
+                <Legend />
+                <Bar dataKey="Baseline CO₂ (kg)" fill="#94a3b8" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="Compressed CO₂ (kg)" fill="#16a34a" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            ) : (
+              <RadarChart data={radarData} cx="50%" cy="50%" outerRadius="70%">
+                <PolarGrid />
+                <PolarAngleAxis dataKey="name" tick={{ fontSize: 10 }} />
+                <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fontSize: 9 }} />
+                <Radar name="Accuracy" dataKey="Accuracy" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.15} />
+                <Radar name="Size Reduction" dataKey="Size Reduction" stroke="#22c55e" fill="#22c55e" fillOpacity={0.15} />
+                <Legend />
+                <Tooltip />
+              </RadarChart>
+            )}
+          </ResponsiveContainer>
+        )}
       </div>
     </div>
   );

@@ -80,11 +80,14 @@ class CompactStudent(nn.Module):
             _dsconv(512, 512),             # 4x4
             nn.AdaptiveAvgPool2d(1),       # → 1x1
         )
+        # Dropout improves confidence calibration and reduces overfitting on CIFAR-sized data.
+        self.dropout = nn.Dropout(p=0.35)
         self.classifier = nn.Linear(512, num_classes)
 
     def forward(self, x):
         x = self.features(x)
         x = x.view(x.size(0), -1)
+        x = self.dropout(x)
         x = self.classifier(x)
         return x
 
@@ -131,6 +134,37 @@ def count_params(model):
 def count_nonzero(model):
     """Count non-zero parameters (useful after pruning)."""
     return sum((p != 0).sum().item() for p in model.parameters())
+
+
+def _collect_prunable_modules(model):
+    """Collect current Conv2d/Linear modules that expose a weight parameter."""
+    prunable = []
+    for module in model.modules():
+        if isinstance(module, (nn.Conv2d, nn.Linear)) and hasattr(module, 'weight'):
+            prunable.append((module, 'weight'))
+    return prunable
+
+
+def _safe_remove_pruning(module, name='weight'):
+    """Best-effort removal of torch.nn.utils.prune reparameterization."""
+    orig_name = f'{name}_orig'
+    mask_name = f'{name}_mask'
+    if not hasattr(module, orig_name) or not hasattr(module, mask_name):
+        return False
+    try:
+        prune.remove(module, name)
+        return True
+    except (ValueError, AttributeError, KeyError, RuntimeError):
+        return False
+
+
+def _remove_pruning_from_model(model):
+    """Remove pruning reparameterization from all supported layers in a model."""
+    removed = 0
+    for module, _ in _collect_prunable_modules(model):
+        if _safe_remove_pruning(module, 'weight'):
+            removed += 1
+    return removed
 
 
 def _tensor_is_floating_point(tensor: torch.Tensor) -> bool:
@@ -353,28 +387,49 @@ def measure_latency(model, input_shape=(1, 3, 32, 32), dev=None, n_runs=100):
 
 
 def _start_emissions_tracker(project_name, output_dir):
-    """Best-effort CodeCarbon tracker start. Returns tracker or None."""
+    """Best-effort CodeCarbon tracker start. Returns tracker or None.
+
+    Prefers EmissionsTracker and falls back to OfflineEmissionsTracker.
+    Uses measure_power_secs=1 so short compression/inference workloads are sampled.
+    """
     country_iso_code = "PAK"
     region = "Punjab"
+    base_kwargs = {
+        "project_name": project_name,
+        "output_dir": output_dir,
+        "log_level": "error",
+        "measure_power_secs": 1,
+    }
+
+    try:
+        from codecarbon import EmissionsTracker
+        print(
+            f"[CodeCarbon] Starting EmissionsTracker | project={project_name} "
+            f"| output_dir={output_dir}"
+        )
+        tracker = EmissionsTracker(**base_kwargs)
+        tracker.start()
+        print("[CodeCarbon] EmissionsTracker started successfully")
+        return tracker
+    except Exception as online_err:
+        print(f"[CodeCarbon] EmissionsTracker unavailable, trying offline mode: {online_err}")
+
     try:
         from codecarbon import OfflineEmissionsTracker
         print(
-            f"[CodeCarbon] Starting tracker | project={project_name} "
-            f"| country={country_iso_code} | region={region} "
-            f"| output_dir={output_dir}"
+            f"[CodeCarbon] Starting OfflineEmissionsTracker | project={project_name} "
+            f"| country={country_iso_code} | region={region} | output_dir={output_dir}"
         )
         tracker = OfflineEmissionsTracker(
-            project_name=project_name,
-            output_dir=output_dir,
+            **base_kwargs,
             country_iso_code=country_iso_code,
             region=region,
-            log_level="error",
         )
         tracker.start()
-        print("[CodeCarbon] Tracker started successfully")
+        print("[CodeCarbon] OfflineEmissionsTracker started successfully")
         return tracker
-    except Exception as e:
-        print(f"[CodeCarbon] Tracker not started: {e}")
+    except Exception as offline_err:
+        print(f"[CodeCarbon] Tracker not started: {offline_err}")
         return None
 
 
@@ -384,12 +439,73 @@ def _stop_emissions_tracker(tracker):
         return 0.0, 0.0
     try:
         emissions = tracker.stop()
-        emissions_kg = round(float(emissions), 8) if emissions else 0.0
-        # Keep parity with existing project approximation.
-        energy_kwh = round(emissions_kg / 1000, 8)
+        emissions_kg = float(emissions) if emissions is not None else 0.0
+        if emissions_kg != emissions_kg or emissions_kg < 0:  # NaN/negative guard
+            emissions_kg = 0.0
+
+        # Prefer tracker-reported energy if available.
+        energy_kwh = 0.0
+        final_data = getattr(tracker, "final_emissions_data", None)
+        if final_data is not None and hasattr(final_data, "energy_consumed"):
+            try:
+                energy_kwh = float(final_data.energy_consumed)
+            except (TypeError, ValueError):
+                energy_kwh = 0.0
+
+        # Fallback approximation used by prior code when explicit energy is unavailable.
+        if energy_kwh <= 0 and emissions_kg > 0:
+            energy_kwh = emissions_kg / 1000
+
+        emissions_kg = round(emissions_kg, 12)
+        energy_kwh = round(max(energy_kwh, 0.0), 12)
         return emissions_kg, energy_kwh
-    except Exception:
+    except Exception as e:
+        print(f"[CodeCarbon] Failed to stop tracker cleanly: {e}")
         return 0.0, 0.0
+
+
+def _finalize_emissions_tracking(tracker, phase_label, started_at):
+    """Stop tracker and emit debug logs with duration and CO2 values."""
+    elapsed_s = max(time.time() - started_at, 0.0)
+    emissions_kg, energy_kwh = _stop_emissions_tracker(tracker)
+    print(
+        f"[CodeCarbon] {phase_label} CO2 emissions: {emissions_kg} kg | "
+        f"energy: {energy_kwh} kWh | duration: {elapsed_s:.2f}s"
+    )
+    if emissions_kg <= 0 and elapsed_s > 0:
+        print(
+            f"[CodeCarbon] {phase_label} produced 0 CO2. "
+            f"Workload may be too short for measurable emissions."
+        )
+    return emissions_kg, energy_kwh, round(elapsed_s, 2)
+
+
+def _track_inference_emissions(model, loader, dev, project_name, output_dir, max_batches=30):
+    """Run a bounded inference workload under CodeCarbon and return emissions metrics."""
+    tracker = _start_emissions_tracker(project_name=project_name, output_dir=output_dir)
+    started_at = time.time()
+    inference_error = None
+    try:
+        model = model.to(dev)
+        model.eval()
+        with torch.no_grad():
+            for batch_idx, (inputs, _) in enumerate(loader):
+                if max_batches is not None and batch_idx >= max_batches:
+                    break
+                inputs = inputs.to(dev)
+                _extract_logits(model(inputs))
+    except Exception as e:
+        inference_error = e
+    finally:
+        emissions_kg, energy_kwh, duration_s = _finalize_emissions_tracking(
+            tracker,
+            phase_label=f"inference:{project_name}",
+            started_at=started_at,
+        )
+
+    if inference_error is not None:
+        print(f"[CodeCarbon] Inference tracking workload failed: {inference_error}")
+    return emissions_kg, energy_kwh, duration_s
 
 
 def _get_quantization_api():
@@ -719,7 +835,8 @@ def detect_num_classes(model):
     return 10
 
 
-def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32, pin_memory=True):
+def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32,
+                     pin_memory=True, use_color_jitter=True):
     """Get train/test DataLoaders for a given dataset name.
 
     Args:
@@ -733,6 +850,7 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32, pin
         input_size: Spatial size to resize images to (default 32 = native CIFAR).
                     Pretrained ImageNet models typically need 224 or 299.
         pin_memory: Whether to use CUDA pinned memory (disable if OOM issues)
+        use_color_jitter: Whether to apply lightweight color augmentation to train data.
     """
     # Auto-select batch size to prevent GPU OOM on 8 GB cards
     if batch_size is None:
@@ -747,7 +865,7 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32, pin
 
     # Choose the dataset class and normalization stats
     if ds == 'CIFAR10':
-        mean, std = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
+        mean, std = (0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)
         DSClass = torchvision.datasets.CIFAR10
     elif ds == 'CIFAR100':
         mean, std = (0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)
@@ -756,11 +874,15 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32, pin
         raise ValueError(f"Unsupported dataset: {dataset_name}. Use CIFAR10 or CIFAR100.")
 
     data_root = os.path.join(os.path.dirname(__file__), 'data')
+    color_aug = [
+        transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1, hue=0.03)
+    ] if use_color_jitter else []
 
     if input_size > 32:
         # On-the-fly resize with more workers to keep GPU fed
         train_spatial = [
             transforms.Resize(input_size),
+            *color_aug,
             transforms.RandomHorizontalFlip(),
             transforms.RandomCrop(input_size, padding=4),
         ]
@@ -770,6 +892,7 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32, pin
     else:
         # ---- Native 32×32 — no resize needed ----
         train_spatial = [
+            *color_aug,
             transforms.RandomHorizontalFlip(),
             transforms.RandomCrop(32, padding=4),
         ]
@@ -809,21 +932,56 @@ def apply_pruning(model, train_loader, test_loader, device,
     torch.save(model.state_dict(), baseline_path)
     baseline_size = get_size_mb(baseline_path)
 
-    # 🔥 FAST gradual pruning
-    prune_steps = 2
-    step_amount = amount / prune_steps
+    training_emissions_kg = 0.0
+    training_energy_kwh = 0.0
+    training_duration_s = 0.0
+    save_path = ''
+    pruned_size = baseline_size
 
-    for step in range(prune_steps):
-        _cb(f"Pruning step {step+1}/{prune_steps}...")
+    training_tracker = _start_emissions_tracker(
+        project_name=f"compress_{_slugify_name(model_name)}_pruning",
+        output_dir=save_dir,
+    )
+    training_started_at = time.time()
 
-        for module in model.modules():
-            if isinstance(module, (nn.Conv2d, nn.Linear)):
-                prune.l1_unstructured(module, name='weight', amount=step_amount)
+    try:
+        # 🔥 FAST gradual pruning
+        prune_steps = 2
+        step_amount = amount / prune_steps
 
-        # 🔥 quick recovery
-        optimizer = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
+        for step in range(prune_steps):
+            _cb(f"Pruning step {step+1}/{prune_steps}...")
 
-        for _ in range(1):  # only 1 epoch
+            for module in model.modules():
+                if isinstance(module, (nn.Conv2d, nn.Linear)):
+                    prune.l1_unstructured(module, name='weight', amount=step_amount)
+
+            # 🔥 quick recovery
+            optimizer = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
+
+            for _ in range(1):  # only 1 epoch
+                model.train()
+                for batch_idx, (inputs, labels) in enumerate(train_loader):
+                    if batch_idx >= 100:
+                        break
+                    inputs, labels = inputs.to(device), labels.to(device)
+
+                    optimizer.zero_grad()
+                    loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+                    loss.backward()
+                    optimizer.step()
+
+        # 🔥 Final fine-tuning (FAST)
+        _cb("Final fine-tuning after pruning...")
+        optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, fine_tune_epochs)
+        )
+
+        best_acc = 0
+        best_state = copy.deepcopy(model.state_dict())
+
+        for epoch in range(fine_tune_epochs):
             model.train()
             for batch_idx, (inputs, labels) in enumerate(train_loader):
                 if batch_idx >= 100:
@@ -835,66 +993,63 @@ def apply_pruning(model, train_loader, test_loader, device,
                 loss.backward()
                 optimizer.step()
 
-    # 🔥 Final fine-tuning (FAST)
-    _cb("Final fine-tuning after pruning...")
-    optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
+            # 🔥 Fast eval during training
+            acc = evaluate(model, test_loader, dev=device, max_batches=30)
+            _cb(f"[Pruning FT] Epoch {epoch+1}: {acc:.2f}%")
 
-    best_acc = 0
-    best_state = copy.deepcopy(model.state_dict())
+            if acc > best_acc:
+                best_acc = acc
+                best_state = copy.deepcopy(model.state_dict())
+            scheduler.step()
 
-    for epoch in range(fine_tune_epochs):
-        model.train()
-        for batch_idx, (inputs, labels) in enumerate(train_loader):
-            if batch_idx >= 100:
-                break
-            inputs, labels = inputs.to(device), labels.to(device)
+        model.load_state_dict(best_state)
 
-            optimizer.zero_grad()
-            loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
-            loss.backward()
-            optimizer.step()
+        # Remove masks
+        _remove_pruning_from_model(model)
 
-        # 🔥 Fast eval during training
-        acc = evaluate(model, test_loader, dev=device, max_batches=30)
-        _cb(f"[Pruning FT] Epoch {epoch+1}: {acc:.2f}%")
-
-        if acc > best_acc:
-            best_acc = acc
-            best_state = copy.deepcopy(model.state_dict())
-
-    model.load_state_dict(best_state)
-
-    # Remove masks
-    for module in model.modules():
-        if isinstance(module, (nn.Conv2d, nn.Linear)):
-            try:
-                prune.remove(module, 'weight')
-            except:
-                pass
-
-    # Save
-    save_path = build_compressed_model_path(save_dir, model_name, 'pruned')
-    save_path, pruned_size = save_smallest_artifact(model, save_path, prefer_sparse=True)
+        # Save
+        save_path = build_compressed_model_path(save_dir, model_name, 'pruned')
+        save_path, pruned_size = save_smallest_artifact(model, save_path, prefer_sparse=True)
+    finally:
+        training_emissions_kg, training_energy_kwh, training_duration_s = _finalize_emissions_tracking(
+            training_tracker,
+            phase_label=f"compression:{_slugify_name(model_name)}:pruning",
+            started_at=training_started_at,
+        )
+        if os.path.exists(baseline_path):
+            os.remove(baseline_path)
 
     # ✅ FINAL full evaluation
     pruned_acc = evaluate(model, test_loader, dev=device)
     latency = measure_latency(model, input_shape=input_shape, dev=device)
 
-    if os.path.exists(baseline_path):
-        os.remove(baseline_path)
+    inference_emissions_kg, inference_energy_kwh, inference_duration_s = _track_inference_emissions(
+        model,
+        test_loader,
+        dev=device,
+        project_name=f"infer_{_slugify_name(model_name)}_pruning",
+        output_dir=save_dir,
+        max_batches=30,
+    )
 
-   
     return {
-    "strategy": "pruning",
-    "baseline_accuracy": baseline_acc,
-    "compressed_accuracy": pruned_acc,
-    "original_size_MB": baseline_size,
-    "compressed_size_MB": pruned_size,
-    "size_MB": pruned_size,  # ✅ IMPORTANT
-    "compression_ratio": round(baseline_size / pruned_size, 2),
-    "latency_ms": latency,
-    "training_co2_kg": 0,  # ✅ to avoid frontend crash
-    "saved_path": save_path,
+        "strategy": "pruning",
+        "baseline_accuracy": baseline_acc,
+        "compressed_accuracy": pruned_acc,
+        "original_size_MB": baseline_size,
+        "compressed_size_MB": pruned_size,
+        "size_MB": pruned_size,
+        "compression_ratio": round(baseline_size / pruned_size, 2) if pruned_size > 0 else 0,
+        "latency_ms": latency,
+        "training_emissions_kg": training_emissions_kg,
+        "training_co2_kg": training_emissions_kg,
+        "training_energy_kwh": training_energy_kwh,
+        "inference_emissions_kg": inference_emissions_kg,
+        "inference_co2_kg": inference_emissions_kg,
+        "inference_energy_kwh": inference_energy_kwh,
+        "training_duration_s": training_duration_s,
+        "inference_duration_s": inference_duration_s,
+        "saved_path": save_path,
     }
 
 def apply_quantization(model, train_loader, test_loader, device,
@@ -916,87 +1071,161 @@ def apply_quantization(model, train_loader, test_loader, device,
     torch.save(model.state_dict(), baseline_path)
     baseline_size = get_size_mb(baseline_path)
 
-    # ✅ Pre-finetuning (important)
-    _cb("Pre-finetuning before QAT...")
-    optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
+    training_emissions_kg = 0.0
+    training_energy_kwh = 0.0
+    training_duration_s = 0.0
+    save_path = ''
+    quant_size = baseline_size
+    quantized_model = model
+    quantization_type = "qat_int8"
+    fallback_float_model = None
 
-    for epoch in range(5):
+    training_tracker = _start_emissions_tracker(
+        project_name=f"compress_{_slugify_name(model_name)}_quantization",
+        output_dir=save_dir,
+    )
+    training_started_at = time.time()
+
+    try:
+        # ✅ Pre-finetuning (important)
+        _cb("Pre-finetuning before QAT...")
+        optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
+        pre_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=2, gamma=0.6)
+
+        for epoch in range(5):
+            model.train()
+            for inputs, labels in train_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+
+                optimizer.zero_grad()
+                loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+                loss.backward()
+                optimizer.step()
+
+            acc = evaluate(model, test_loader, dev=device)
+            _cb(f"Pre-QAT Epoch {epoch+1} Accuracy: {acc:.2f}%")
+            pre_scheduler.step()
+
+        # ✅ Prepare for QAT — fbgemm/qnnpack only support QuantizedCPU, so QAT runs on CPU
+        _cb("Moving model to CPU for QAT (QuantizedCPU backend)...")
+        qat_dev = torch.device('cpu')
+        model.to(qat_dev)
         model.train()
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
+        fallback_float_model = copy.deepcopy(model).cpu().eval()
 
-            optimizer.zero_grad()
-            loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
-            loss.backward()
-            optimizer.step()
+        if hasattr(model, 'fuse_model'):
+            model.fuse_model()
 
-        acc = evaluate(model, test_loader, dev=device)
-        _cb(f"Pre-QAT Epoch {epoch+1} Accuracy: {acc:.2f}%")
+        qat_api = _get_quantization_api()
+        backend = _configure_quantized_backend()
+        _cb(f"Using quantized backend: {backend}")
+        model.qconfig = qat_api.get_default_qat_qconfig(backend)
+        qat_api.prepare_qat(model, inplace=True)
 
-    # ✅ Prepare for QAT — fbgemm/qnnpack only support QuantizedCPU, so QAT runs on CPU
-    # GPU was used for float32 pre-finetuning above; now drop back to CPU
-    _cb("Moving model to CPU for QAT (fbgemm/qnnpack are CPU-only backends)...")
-    qat_dev = torch.device('cpu')
-    model.to(qat_dev)
-    model.train()
+        # ✅ STRONG QAT TRAINING (all on CPU)
+        _cb("Starting QAT training (CPU)...")
+        optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
+        qat_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(1, fine_tune_epochs)
+        )
 
-    if hasattr(model, 'fuse_model'):
-        model.fuse_model()
+        best_acc = 0
+        best_state = copy.deepcopy(model.state_dict())
 
-    model.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
-    torch.quantization.prepare_qat(model, inplace=True)
+        for epoch in range(fine_tune_epochs):
+            for inputs, labels in train_loader:
+                inputs, labels = inputs.to(qat_dev), labels.to(qat_dev)
 
-    # ✅ STRONG QAT TRAINING (all on CPU)
-    _cb("Starting QAT training (CPU)...")
-    optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
+                optimizer.zero_grad()
+                loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+                loss.backward()
+                optimizer.step()
 
-    best_acc = 0
-    best_state = copy.deepcopy(model.state_dict())
+            acc = evaluate(model, test_loader, dev=qat_dev)
+            _cb(f"QAT Epoch {epoch+1}/{fine_tune_epochs} - Accuracy: {acc:.2f}%")
 
-    for epoch in range(fine_tune_epochs):
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(qat_dev), labels.to(qat_dev)
+            if acc > best_acc:
+                best_acc = acc
+                best_state = copy.deepcopy(model.state_dict())
+            qat_scheduler.step()
 
-            optimizer.zero_grad()
-            loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
-            loss.backward()
-            optimizer.step()
+        model.load_state_dict(best_state)
 
-        acc = evaluate(model, test_loader, dev=qat_dev)
-        _cb(f"QAT Epoch {epoch+1}/{fine_tune_epochs} - Accuracy: {acc:.2f}%")
+        # ✅ Convert to INT8 (on CPU — required by quantized kernels)
+        _cb("Converting to INT8 (CPU)...")
+        model.eval()
+        try:
+            qat_api.convert(model, inplace=True)
+            quantized_model = model
+            quantization_type = "qat_int8"
+        except Exception as e:
+            print(f"[Quantization] QAT convert failed, using dynamic fallback: {e}")
+            quantization_type = "dynamic_int8_fallback_convert"
+            base_for_fallback = fallback_float_model if fallback_float_model is not None else model.cpu().eval()
+            quantized_model = torch.quantization.quantize_dynamic(
+                base_for_fallback, {nn.Linear}, dtype=torch.qint8
+            )
 
-        if acc > best_acc:
-            best_acc = acc
-            best_state = copy.deepcopy(model.state_dict())
-
-    model.load_state_dict(best_state)
-
-    # ✅ Convert to INT8 (on CPU — required by fbgemm/qnnpack QuantizedCPU kernel)
-    _cb("Converting to INT8 (CPU)...")
-    model.eval()
-    torch.quantization.convert(model, inplace=True)
-
-    # ✅ Save
-    save_path = build_compressed_model_path(save_dir, model_name, 'quantized')
-    save_path, quant_size = save_smallest_artifact(model, save_path, prefer_sparse=False)
+        # ✅ Save
+        save_path = build_compressed_model_path(save_dir, model_name, 'quantized')
+        save_path, quant_size = save_smallest_artifact(quantized_model, save_path, prefer_sparse=False)
+    finally:
+        training_emissions_kg, training_energy_kwh, training_duration_s = _finalize_emissions_tracking(
+            training_tracker,
+            phase_label=f"compression:{_slugify_name(model_name)}:quantization",
+            started_at=training_started_at,
+        )
+        if os.path.exists(baseline_path):
+            os.remove(baseline_path)
 
     # ✅ Final evaluation
-    quant_acc = evaluate(model, test_loader, dev=torch.device('cpu'))
-    latency = measure_latency(model, input_shape=input_shape, dev=torch.device('cpu'))
+    quant_eval_dev = torch.device('cpu')
+    try:
+        quant_acc = evaluate(quantized_model, test_loader, dev=quant_eval_dev)
+    except Exception as e:
+        print(f"[Quantization] Runtime fallback to dynamic quantization: {e}")
+        quantization_type = "dynamic_int8_fallback_runtime"
+        base_for_fallback = fallback_float_model if fallback_float_model is not None else model.cpu().eval()
+        quantized_model = torch.quantization.quantize_dynamic(
+            base_for_fallback, {nn.Linear}, dtype=torch.qint8
+        )
+        save_path, quant_size = save_smallest_artifact(quantized_model, save_path, prefer_sparse=False)
+        quant_acc = evaluate(quantized_model, test_loader, dev=quant_eval_dev)
+    latency = measure_latency(quantized_model, input_shape=input_shape, dev=quant_eval_dev)
 
-    if os.path.exists(baseline_path):
-        os.remove(baseline_path)
+    inference_emissions_kg, inference_energy_kwh, inference_duration_s = _track_inference_emissions(
+        quantized_model,
+        test_loader,
+        dev=quant_eval_dev,
+        project_name=f"infer_{_slugify_name(model_name)}_quantization",
+        output_dir=save_dir,
+        max_batches=30,
+    )
 
-    compression_ratio = round(baseline_size / quant_size, 2)
+    compression_ratio = round(baseline_size / quant_size, 2) if quant_size > 0 else 0
 
     return {
         "strategy": "quantization",
         "baseline_accuracy": baseline_acc,
         "compressed_accuracy": quant_acc,
         "original_size_MB": baseline_size,
+        "baseline_size_MB": baseline_size,
         "compressed_size_MB": quant_size,
+        "size_MB": quant_size,
         "compression_ratio": compression_ratio,
+        "size_reduction_percent": round(
+            100 * (baseline_size - quant_size) / baseline_size, 2
+        ) if baseline_size > 0 else 0,
         "latency_ms": latency,
+        "quantization_type": quantization_type,
+        "training_emissions_kg": training_emissions_kg,
+        "training_co2_kg": training_emissions_kg,
+        "training_energy_kwh": training_energy_kwh,
+        "inference_emissions_kg": inference_emissions_kg,
+        "inference_co2_kg": inference_emissions_kg,
+        "inference_energy_kwh": inference_energy_kwh,
+        "training_duration_s": training_duration_s,
+        "inference_duration_s": inference_duration_s,
         "saved_path": save_path,
     }
 def apply_hybrid(model, train_loader, test_loader, device,
@@ -1025,11 +1254,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
 
     # Step 1: Prune
     _cb(f"Applying {int(amount*100)}% L1 unstructured pruning...")
-    params_to_prune = [
-        (m, 'weight') for _, m in model.named_modules()
-        if isinstance(m, (nn.Conv2d, nn.Linear))
-    ]
-    if not params_to_prune:
+    if not _collect_prunable_modules(model):
         raise ValueError("Model has no Conv2d or Linear layers to prune.")
 
     prune_steps = max(2, min(5, fine_tune_epochs if fine_tune_epochs > 0 else 2))
@@ -1039,8 +1264,14 @@ def apply_hybrid(model, train_loader, test_loader, device,
         step_succeeded = False
         for retry in range(2):
             backup_model = copy.deepcopy(model)
+            current_params_to_prune = _collect_prunable_modules(model)
+            if not current_params_to_prune:
+                raise ValueError("Model has no Conv2d or Linear layers to prune.")
             prune.global_unstructured(
-                params_to_prune, pruning_method=prune.L1Unstructured, amount=step_amount)
+                current_params_to_prune,
+                pruning_method=prune.L1Unstructured,
+                amount=step_amount,
+            )
             step_acc = evaluate(model, test_loader, dev=device, max_batches=20)
             _log_guard("hybrid-prune-step", step + 1, step_acc, baseline_acc, allowed_drop)
             _record_accuracy_checkpoint(
@@ -1076,6 +1307,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
     training_tracker = None
     training_emissions_kg = 0.0
     training_energy_kwh = 0.0
+    training_duration_s = 0.0
     best_state = copy.deepcopy(model.state_dict())
     best_acc = evaluate(model, test_loader, dev=device, max_batches=20)
     if fine_tune_epochs > 0:
@@ -1083,51 +1315,61 @@ def apply_hybrid(model, train_loader, test_loader, device,
             project_name=f"train_after_compress_{_slugify_name(model_name)}_hybrid",
             output_dir=save_dir,
         )
-        optimizer = optim.SGD(model.parameters(), lr=0.001,
-                              momentum=0.9, weight_decay=5e-4)
-        for epoch in range(fine_tune_epochs):
-            _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} (0/{max_batches} batches)...")
-            model.train()
-            for batch_idx, (inputs, labels) in enumerate(train_loader):
-                if batch_idx >= max_batches:
-                    break
-                inputs, labels = inputs.to(device), labels.to(device)
-                optimizer.zero_grad()
-                loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
-                loss.backward()
-                optimizer.step()
-                if (batch_idx + 1) % 10 == 0:
-                    _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — batch {batch_idx+1}/{max_batches}")
-            _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — done")
-            epoch_acc = evaluate(model, test_loader, dev=device, max_batches=20)
-            _log_guard("hybrid-ft", epoch + 1, epoch_acc, baseline_acc, allowed_drop)
-            _record_accuracy_checkpoint(
-                accuracy_checkpoints,
-                "fine_tune_epoch",
-                epoch + 1,
-                epoch_acc,
-                baseline_acc,
-                allowed_drop,
+        training_started_at = time.time()
+        try:
+            optimizer = optim.SGD(model.parameters(), lr=0.001,
+                                  momentum=0.9, weight_decay=5e-4)
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max(1, fine_tune_epochs)
             )
-            if epoch_acc > best_acc:
-                best_acc = epoch_acc
-                best_state = copy.deepcopy(model.state_dict())
-            elif not _accuracy_guard(epoch_acc, baseline_acc, allowed_drop=allowed_drop):
-                for group in optimizer.param_groups:
-                    group['lr'] = max(group['lr'] * 0.5, 1e-5)
-                _cb(
-                    f"Hybrid fine-tune epoch {epoch+1} dipped below accuracy guard; "
-                    f"reducing LR to {optimizer.param_groups[0]['lr']:.6f}."
+            for epoch in range(fine_tune_epochs):
+                _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} (0/{max_batches} batches)...")
+                model.train()
+                for batch_idx, (inputs, labels) in enumerate(train_loader):
+                    if batch_idx >= max_batches:
+                        break
+                    inputs, labels = inputs.to(device), labels.to(device)
+                    optimizer.zero_grad()
+                    loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+                    loss.backward()
+                    optimizer.step()
+                    if (batch_idx + 1) % 10 == 0:
+                        _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — batch {batch_idx+1}/{max_batches}")
+                _cb(f"Fine-tuning epoch {epoch+1}/{fine_tune_epochs} — done")
+                epoch_acc = evaluate(model, test_loader, dev=device, max_batches=20)
+                _log_guard("hybrid-ft", epoch + 1, epoch_acc, baseline_acc, allowed_drop)
+                _record_accuracy_checkpoint(
+                    accuracy_checkpoints,
+                    "fine_tune_epoch",
+                    epoch + 1,
+                    epoch_acc,
+                    baseline_acc,
+                    allowed_drop,
                 )
-                if epoch >= 1:
-                    break
-        training_emissions_kg, training_energy_kwh = _stop_emissions_tracker(training_tracker)
+                if epoch_acc > best_acc:
+                    best_acc = epoch_acc
+                    best_state = copy.deepcopy(model.state_dict())
+                elif not _accuracy_guard(epoch_acc, baseline_acc, allowed_drop=allowed_drop):
+                    for group in optimizer.param_groups:
+                        group['lr'] = max(group['lr'] * 0.5, 1e-5)
+                    _cb(
+                        f"Hybrid fine-tune epoch {epoch+1} dipped below accuracy guard; "
+                        f"reducing LR to {optimizer.param_groups[0]['lr']:.6f}."
+                    )
+                    if epoch >= 1:
+                        break
+                scheduler.step()
+        finally:
+            training_emissions_kg, training_energy_kwh, training_duration_s = _finalize_emissions_tracking(
+                training_tracker,
+                phase_label=f"compression:{_slugify_name(model_name)}:hybrid_finetune",
+                started_at=training_started_at,
+            )
 
     model.load_state_dict(best_state)
 
     # Remove masks AFTER fine-tuning so zeros are permanent
-    for m, _ in params_to_prune:
-        prune.remove(m, 'weight')
+    _remove_pruning_from_model(model)
 
     # Measure sparsity before quantization
     nonzero = count_nonzero(model)
@@ -1212,6 +1454,15 @@ def apply_hybrid(model, train_loader, test_loader, device,
         hybrid_acc = evaluate(quant_model, test_loader, dev=cpu_dev, max_batches=50)
     latency = measure_latency(quant_model, input_shape=input_shape, dev=cpu_dev, n_runs=20)
 
+    inference_emissions_kg, inference_energy_kwh, inference_duration_s = _track_inference_emissions(
+        quant_model,
+        test_loader,
+        dev=cpu_dev,
+        project_name=f"infer_{_slugify_name(model_name)}_hybrid",
+        output_dir=save_dir,
+        max_batches=30,
+    )
+
     if os.path.exists(baseline_path):
         os.remove(baseline_path)
 
@@ -1242,6 +1493,11 @@ def apply_hybrid(model, train_loader, test_loader, device,
         "training_emissions_kg": training_emissions_kg,
         "training_co2_kg": training_emissions_kg,
         "training_energy_kwh": training_energy_kwh,
+        "inference_emissions_kg": inference_emissions_kg,
+        "inference_co2_kg": inference_emissions_kg,
+        "inference_energy_kwh": inference_energy_kwh,
+        "training_duration_s": training_duration_s,
+        "inference_duration_s": inference_duration_s,
         "saved_path": save_path,
     }
 
@@ -1289,6 +1545,7 @@ def apply_kd(teacher, train_loader, test_loader, device,
     allowed_drop = accuracy_drop_threshold
     training_emissions_kg = 0.0
     training_energy_kwh = 0.0
+    training_duration_s = 0.0
     training_tracker = None
     consecutive_guard_hits = 0
     accuracy_checkpoints = []
@@ -1300,61 +1557,70 @@ def apply_kd(teacher, train_loader, test_loader, device,
             project_name=f"train_after_compress_{_slugify_name(model_name)}_kd",
             output_dir=save_dir,
         )
+        training_started_at = time.time()
+    else:
+        training_started_at = None
 
     max_batches = 100  # cap per epoch for speed
-    for epoch in range(epochs):
-        _cb(f"KD training epoch {epoch+1}/{epochs} (0/{max_batches} batches)...")
-        student.train()
-        for batch_idx, (inputs, labels) in enumerate(train_loader):
-            if batch_idx >= max_batches:
-                break
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            # Teacher uses original resolution
-            with torch.no_grad():
-                t_out = _extract_logits(teacher(inputs))
-            # Student uses 32×32
-            s_inputs = F.interpolate(inputs, size=student_size_px,
-                                     mode='bilinear', align_corners=False
-                                     ) if needs_resize else inputs
-            s_out = _extract_logits(student(s_inputs))
-            loss = distillation_loss(s_out, t_out, labels, T=4.0, alpha=0.3)
-            loss.backward()
-            optimizer.step()
-            if (batch_idx + 1) % 20 == 0:
-                _cb(f"KD training epoch {epoch+1}/{epochs} — batch {batch_idx+1}/{max_batches}")
-        _cb(f"KD training epoch {epoch+1}/{epochs} — done")
-        scheduler.step()
+    try:
+        for epoch in range(epochs):
+            _cb(f"KD training epoch {epoch+1}/{epochs} (0/{max_batches} batches)...")
+            student.train()
+            for batch_idx, (inputs, labels) in enumerate(train_loader):
+                if batch_idx >= max_batches:
+                    break
+                inputs, labels = inputs.to(device), labels.to(device)
+                optimizer.zero_grad()
+                # Teacher uses original resolution
+                with torch.no_grad():
+                    t_out = _extract_logits(teacher(inputs))
+                # Student uses 32×32
+                s_inputs = F.interpolate(inputs, size=student_size_px,
+                                         mode='bilinear', align_corners=False
+                                         ) if needs_resize else inputs
+                s_out = _extract_logits(student(s_inputs))
+                loss = distillation_loss(s_out, t_out, labels, T=4.0, alpha=0.3)
+                loss.backward()
+                optimizer.step()
+                if (batch_idx + 1) % 20 == 0:
+                    _cb(f"KD training epoch {epoch+1}/{epochs} — batch {batch_idx+1}/{max_batches}")
+            _cb(f"KD training epoch {epoch+1}/{epochs} — done")
+            scheduler.step()
 
-        # Evaluate student with resized inputs
-        acc = _evaluate_with_resize(student, test_loader, student_size_px,
-                                     needs_resize, dev=device)
-        _log_guard("kd", epoch + 1, acc, teacher_acc, allowed_drop)
-        _record_accuracy_checkpoint(
-            accuracy_checkpoints,
-            "kd_epoch",
-            epoch + 1,
-            acc,
-            teacher_acc,
-            allowed_drop,
-        )
-        if acc >= best_acc:
-            best_acc = acc
-            torch.save(student.state_dict(), save_path)
-            consecutive_guard_hits = 0
-        elif not _accuracy_guard(acc, teacher_acc, allowed_drop=allowed_drop):
-            consecutive_guard_hits += 1
-            for group in optimizer.param_groups:
-                group['lr'] = max(group['lr'] * 0.5, 1e-5)
-            print(
-                f"[KD] Accuracy guard triggered; reducing LR to {optimizer.param_groups[0]['lr']:.6f} "
-                f"(hit {consecutive_guard_hits}/2)."
+            # Evaluate student with resized inputs
+            acc = _evaluate_with_resize(student, test_loader, student_size_px,
+                                         needs_resize, dev=device)
+            _log_guard("kd", epoch + 1, acc, teacher_acc, allowed_drop)
+            _record_accuracy_checkpoint(
+                accuracy_checkpoints,
+                "kd_epoch",
+                epoch + 1,
+                acc,
+                teacher_acc,
+                allowed_drop,
             )
-            if consecutive_guard_hits >= 2:
-                print("[KD] Early stopping due to repeated accuracy guard failures.")
-                break
-
-    training_emissions_kg, training_energy_kwh = _stop_emissions_tracker(training_tracker)
+            if acc >= best_acc:
+                best_acc = acc
+                torch.save(student.state_dict(), save_path)
+                consecutive_guard_hits = 0
+            elif not _accuracy_guard(acc, teacher_acc, allowed_drop=allowed_drop):
+                consecutive_guard_hits += 1
+                for group in optimizer.param_groups:
+                    group['lr'] = max(group['lr'] * 0.5, 1e-5)
+                print(
+                    f"[KD] Accuracy guard triggered; reducing LR to {optimizer.param_groups[0]['lr']:.6f} "
+                    f"(hit {consecutive_guard_hits}/2)."
+                )
+                if consecutive_guard_hits >= 2:
+                    print("[KD] Early stopping due to repeated accuracy guard failures.")
+                    break
+    finally:
+        if training_started_at is not None:
+            training_emissions_kg, training_energy_kwh, training_duration_s = _finalize_emissions_tracking(
+                training_tracker,
+                phase_label=f"compression:{_slugify_name(model_name)}:kd",
+                started_at=training_started_at,
+            )
 
     # Ensure a checkpoint exists even in degenerate cases.
     if not os.path.exists(save_path):
@@ -1368,6 +1634,15 @@ def apply_kd(teacher, train_loader, test_loader, device,
     # Measure latency at the student's native 32×32 resolution
     student_input_shape = (1, input_shape[1], student_size_px, student_size_px)
     latency = measure_latency(student, input_shape=student_input_shape, dev=device)
+
+    inference_emissions_kg, inference_energy_kwh, inference_duration_s = _track_inference_emissions(
+        student,
+        test_loader,
+        dev=device,
+        project_name=f"infer_{_slugify_name(model_name)}_kd",
+        output_dir=save_dir,
+        max_batches=30,
+    )
 
     if os.path.exists(teacher_path):
         os.remove(teacher_path)
@@ -1399,6 +1674,11 @@ def apply_kd(teacher, train_loader, test_loader, device,
         "training_emissions_kg": training_emissions_kg,
         "training_co2_kg": training_emissions_kg,
         "training_energy_kwh": training_energy_kwh,
+        "inference_emissions_kg": inference_emissions_kg,
+        "inference_co2_kg": inference_emissions_kg,
+        "inference_energy_kwh": inference_energy_kwh,
+        "training_duration_s": training_duration_s,
+        "inference_duration_s": inference_duration_s,
         "saved_path": save_path,
     }
 
@@ -1473,34 +1753,51 @@ def compress_dynamic(model_path, strategy, dataset='CIFAR10',
         )
 
     # Add post-compression inference emissions tracking
-    try:
-        tracker = _start_emissions_tracker(
-            project_name=f"compress_{strategy}",
-            output_dir=save_dir,
-        )
-        # Quick inference pass to measure energy using the original model
-        model.eval()
-        model = model.to(device)
-        with torch.no_grad():
-            for i, (inputs, _) in enumerate(test_loader):
-                inputs = inputs.to(device)
-                model(inputs)
-                if i >= 20:
-                    break
-        inference_emissions_kg, inference_energy_kwh = _stop_emissions_tracker(tracker)
-        result["emissions_kg"] = inference_emissions_kg
-        result["co2_kg"] = inference_emissions_kg
-        result["energy_kwh"] = inference_energy_kwh
-        result["inference_emissions_kg"] = inference_emissions_kg
-        result["inference_co2_kg"] = inference_emissions_kg
-        result["inference_energy_kwh"] = inference_energy_kwh
-    except Exception:
-        result["emissions_kg"] = 0
-        result["co2_kg"] = 0
-        result["energy_kwh"] = 0
-        result["inference_emissions_kg"] = 0
-        result["inference_co2_kg"] = 0
-        result["inference_energy_kwh"] = 0
+    inference_emissions_kg = result.get("inference_emissions_kg")
+    inference_co2_kg = result.get("inference_co2_kg")
+    inference_energy_kwh = result.get("inference_energy_kwh")
+
+    # Fallback only when strategy did not already provide inference tracking.
+    if inference_emissions_kg is None and inference_co2_kg is None:
+        try:
+            tracker = _start_emissions_tracker(
+                project_name=f"compress_{strategy}_fallback_inference",
+                output_dir=save_dir,
+            )
+            fallback_started_at = time.time()
+            # Fallback pass on available model reference.
+            model.eval()
+            model = model.to(device)
+            with torch.no_grad():
+                for i, (inputs, _) in enumerate(test_loader):
+                    inputs = inputs.to(device)
+                    _extract_logits(model(inputs))
+                    if i >= 30:
+                        break
+            inference_emissions_kg, inference_energy_kwh, _ = _finalize_emissions_tracking(
+                tracker,
+                phase_label=f"inference:fallback:{strategy}",
+                started_at=fallback_started_at,
+            )
+            inference_co2_kg = inference_emissions_kg
+        except Exception as e:
+            print(f"[CodeCarbon] Fallback inference tracking failed for {strategy}: {e}")
+
+    if inference_emissions_kg is None:
+        inference_emissions_kg = inference_co2_kg
+    if inference_co2_kg is None:
+        inference_co2_kg = inference_emissions_kg
+    if inference_energy_kwh is None:
+        inference_energy_kwh = result.get("energy_kwh", 0.0)
+
+    result["inference_emissions_kg"] = inference_emissions_kg if inference_emissions_kg is not None else 0.0
+    result["inference_co2_kg"] = inference_co2_kg if inference_co2_kg is not None else 0.0
+    result["inference_energy_kwh"] = inference_energy_kwh if inference_energy_kwh is not None else 0.0
+
+    # Keep legacy top-level aliases in sync with inference metrics.
+    result["emissions_kg"] = result["inference_emissions_kg"]
+    result["co2_kg"] = result["inference_co2_kg"]
+    result["energy_kwh"] = result["inference_energy_kwh"]
 
     # Add FLOPs estimate (use original model — FLOPs don't change with pruning/quantization)
     try:
@@ -1840,33 +2137,50 @@ def run_compression(model_name, method, dataset='CIFAR10',
 
     # Step 4: Post-compression inference emissions tracking
     _cb('energy_tracking', 'Measuring energy consumption...')
-    try:
-        tracker = _start_emissions_tracker(
-            project_name=f"compress_{model_key}_{method}",
-            output_dir=save_dir,
-        )
-        model.eval()
-        model = model.to(device)
-        with torch.no_grad():
-            for i, (inputs, _) in enumerate(test_loader):
-                inputs = inputs.to(device)
-                model(inputs)
-                if i >= 20:
-                    break
-        inference_emissions_kg, inference_energy_kwh = _stop_emissions_tracker(tracker)
-        result["emissions_kg"] = inference_emissions_kg
-        result["co2_kg"] = inference_emissions_kg
-        result["energy_kwh"] = inference_energy_kwh
-        result["inference_emissions_kg"] = inference_emissions_kg
-        result["inference_co2_kg"] = inference_emissions_kg
-        result["inference_energy_kwh"] = inference_energy_kwh
-    except Exception:
-        result["emissions_kg"] = 0
-        result["co2_kg"] = 0
-        result["energy_kwh"] = 0
-        result["inference_emissions_kg"] = 0
-        result["inference_co2_kg"] = 0
-        result["inference_energy_kwh"] = 0
+    inference_emissions_kg = result.get("inference_emissions_kg")
+    inference_co2_kg = result.get("inference_co2_kg")
+    inference_energy_kwh = result.get("inference_energy_kwh")
+
+    # Fallback only when strategy result does not already include inference metrics.
+    if inference_emissions_kg is None and inference_co2_kg is None:
+        try:
+            tracker = _start_emissions_tracker(
+                project_name=f"compress_{model_key}_{method}_fallback_inference",
+                output_dir=save_dir,
+            )
+            fallback_started_at = time.time()
+            model.eval()
+            model = model.to(device)
+            with torch.no_grad():
+                for i, (inputs, _) in enumerate(test_loader):
+                    inputs = inputs.to(device)
+                    _extract_logits(model(inputs))
+                    if i >= 30:
+                        break
+            inference_emissions_kg, inference_energy_kwh, _ = _finalize_emissions_tracking(
+                tracker,
+                phase_label=f"inference:fallback:{model_key}:{method}",
+                started_at=fallback_started_at,
+            )
+            inference_co2_kg = inference_emissions_kg
+        except Exception as e:
+            print(f"[CodeCarbon] Fallback inference tracking failed for {model_key}/{method}: {e}")
+
+    if inference_emissions_kg is None:
+        inference_emissions_kg = inference_co2_kg
+    if inference_co2_kg is None:
+        inference_co2_kg = inference_emissions_kg
+    if inference_energy_kwh is None:
+        inference_energy_kwh = result.get("energy_kwh", 0.0)
+
+    result["inference_emissions_kg"] = inference_emissions_kg if inference_emissions_kg is not None else 0.0
+    result["inference_co2_kg"] = inference_co2_kg if inference_co2_kg is not None else 0.0
+    result["inference_energy_kwh"] = inference_energy_kwh if inference_energy_kwh is not None else 0.0
+
+    # Keep legacy top-level aliases in sync with inference metrics.
+    result["emissions_kg"] = result["inference_emissions_kg"]
+    result["co2_kg"] = result["inference_co2_kg"]
+    result["energy_kwh"] = result["inference_energy_kwh"]
 
     # Step 5: FLOPs estimate
     _cb('evaluating', 'Computing FLOPs and final metrics...')
@@ -1965,14 +2279,16 @@ if __name__ == "__main__":
     transform_train = transforms.Compose([
         transforms.RandomHorizontalFlip(),
         transforms.RandomCrop(32, padding=4),
+        transforms.Resize(32),
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465),
-                             (0.2023, 0.1994, 0.2010))
+                             (0.2470, 0.2435, 0.2616))
     ])
     transform_test = transforms.Compose([
+        transforms.Resize(32),
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465),
-                             (0.2023, 0.1994, 0.2010))
+                             (0.2470, 0.2435, 0.2616))
     ])
 
     train_dataset = torchvision.datasets.CIFAR10(
@@ -2034,14 +2350,12 @@ if __name__ == "__main__":
     pruned_model = pruned_model.to(device)
 
     # Global unstructured L1 pruning — removes 70% of smallest weights
-    params_to_prune = [
-        (m, 'weight') for _, m in pruned_model.named_modules()
-        if isinstance(m, (nn.Conv2d, nn.Linear))
-    ]
+    params_to_prune = _collect_prunable_modules(pruned_model)
+    if not params_to_prune:
+        raise ValueError("Baseline model has no Conv2d or Linear layers to prune.")
     prune.global_unstructured(
         params_to_prune, pruning_method=prune.L1Unstructured, amount=0.7)
-    for m, _ in params_to_prune:
-        prune.remove(m, 'weight')
+    _remove_pruning_from_model(pruned_model)
 
     # Fine-tune to recover accuracy lost from aggressive pruning
     print("  Fine-tuning pruned model (5 epochs)...")
@@ -2349,14 +2663,12 @@ if __name__ == "__main__":
         torch.load(student_model_path, map_location=device))
 
     # Prune 50% of compact student's weights
-    ultra_prune_params = [
-        (m, 'weight') for _, m in ultra_model.named_modules()
-        if isinstance(m, (nn.Conv2d, nn.Linear))
-    ]
+    ultra_prune_params = _collect_prunable_modules(ultra_model)
+    if not ultra_prune_params:
+        raise ValueError("Compact student has no Conv2d or Linear layers to prune.")
     prune.global_unstructured(
         ultra_prune_params, pruning_method=prune.L1Unstructured, amount=0.5)
-    for m, _ in ultra_prune_params:
-        prune.remove(m, 'weight')
+    _remove_pruning_from_model(ultra_model)
 
     # Create pruning mask to enforce sparsity during fine-tuning
     pruning_masks = {}

@@ -38,7 +38,7 @@ from torch.utils.data import DataLoader
 
 # ─── Constants ─────────────────────────────────────────────────────────────────
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
-CIFAR10_STD  = (0.2023, 0.1994, 0.2010)
+CIFAR10_STD  = (0.2470, 0.2435, 0.2616)
 NUM_CLASSES  = 10
 
 # Model → required spatial input size

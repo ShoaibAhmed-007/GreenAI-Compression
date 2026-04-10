@@ -44,6 +44,39 @@ const STRATEGY_LABELS: Record<string, string> = {
 
 const ALL_METHODS = ['pruning', 'quantization', 'hybrid', 'kd'];
 
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function getTrainingCo2(result: DynamicResult): number | null {
+  return toFiniteNumber(result.training_co2_kg ?? result.training_emissions_kg);
+}
+
+function getInferenceCo2(result: DynamicResult): number | null {
+  return toFiniteNumber(result.inference_co2_kg ?? result.inference_emissions_kg ?? result.emissions_kg);
+}
+
+function getPrimaryCo2(result: DynamicResult): number | null {
+  return getTrainingCo2(result) ?? getInferenceCo2(result);
+}
+
+function formatCo2(value: number | null | undefined): string {
+  if (value == null) {
+    return 'Not Available';
+  }
+  if (value > 0 && value < 0.000001) {
+    return '<0.000001 kg';
+  }
+  return `${value.toFixed(6)} kg`;
+}
+
 export function ModelDashboard({ model, modelKey, compressionResults, onNewResult, onClose }: ModelDashboardProps) {
   const [method, setMethod] = useState('pruning');
   const [dataset, setDataset] = useState(model.dataset || 'CIFAR10');
@@ -78,8 +111,11 @@ export function ModelDashboard({ model, modelKey, compressionResults, onNewResul
     size_MB: model.size_MB || 0,
     baseline_size_MB: model.size_MB || 0,
     size_reduction_percent: 0,
-    latency_ms: model.latency_ms || 0,
-    emissions_kg: 0,
+    // latency_ms: model.latency_ms || 0,
+    emissions_kg: toFiniteNumber(model.training_co2_kg) ?? Number.NaN,
+    training_emissions_kg: toFiniteNumber(model.training_co2_kg) ?? undefined,
+    training_co2_kg: toFiniteNumber(model.training_co2_kg) ?? undefined,
+    training_energy_kwh: toFiniteNumber(model.training_energy_kwh) ?? undefined,
     flops: 0,
     flops_M: 0,
     sparsity_percent: 0,
@@ -303,7 +339,12 @@ export function ModelDashboard({ model, modelKey, compressionResults, onNewResul
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
           <MetricCard label="Baseline Accuracy" value={`${model.accuracy}%`} color="text-blue-600" />
           <MetricCard label="Model Size" value={`${model.size_MB} MB`} color="text-purple-600" />
-          <MetricCard label="Latency" value={`${model.latency_ms} ms`} color="text-amber-600" />
+          {/* <MetricCard label="Latency" value={`${model.latency_ms} ms`} color="text-amber-600" /> */}
+          <MetricCard
+            label="Train CO2"
+            value={formatCo2(toFiniteNumber(model.training_co2_kg))}
+            color="text-emerald-600"
+          />
           <MetricCard
             label="Parameters"
             value={model.total_params ? `${(model.total_params / 1e6).toFixed(1)}M` : model.params_label}
@@ -539,7 +580,7 @@ export function ModelDashboard({ model, modelKey, compressionResults, onNewResul
                         <td className="text-right py-2 px-2 font-mono text-gray-700">{r.compressed_accuracy}%</td>
                         <td className="text-right py-2 px-2 font-mono text-gray-700">{r.size_MB} MB</td>
                         <td className="text-right py-2 px-2 font-mono text-green-600">↓{(r.size_reduction_percent || 0).toFixed(1)}%</td>
-                        <td className="text-right py-2 px-2 font-mono text-gray-500">{r.emissions_kg?.toFixed(6) || '—'}</td>
+                        <td className="text-right py-2 px-2 font-mono text-gray-500">{formatCo2(getPrimaryCo2(r))}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -572,6 +613,8 @@ function ResultCard({
   accDiff: number;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const trainingCo2 = getTrainingCo2(result);
+  const inferenceCo2 = getInferenceCo2(result);
 
   return (
     <div className="border border-gray-100 rounded-lg overflow-hidden">
@@ -611,7 +654,7 @@ function ResultCard({
             <MiniMetric label="Baseline Acc." value={`${result.baseline_accuracy}%`} />
             <MiniMetric label="Compressed Acc." value={`${result.compressed_accuracy}%`} />
             <MiniMetric label="Baseline Size" value={`${result.baseline_size_MB} MB`} />
-            <MiniMetric label="Latency" value={`${result.latency_ms} ms`} />
+            {/* <MiniMetric label="Latency" value={`${result.latency_ms} ms`} /> */}
           </div>
 
           <div className="mt-2">
@@ -632,7 +675,9 @@ function ResultCard({
               <DetailRow label="Sparsity" value={`${result.sparsity_percent}%`} />
             )}
             {result.quantization_type && <DetailRow label="Quantization" value={result.quantization_type} />}
-            {result.emissions_kg != null && <DetailRow label="CO₂" value={`${result.emissions_kg.toFixed(6)} kg`} />}
+            {trainingCo2 != null && <DetailRow label="Train CO2" value={formatCo2(trainingCo2)} />}
+            {inferenceCo2 != null && <DetailRow label="Infer CO2" value={formatCo2(inferenceCo2)} />}
+            {trainingCo2 == null && inferenceCo2 == null && <DetailRow label="CO2" value="Not Available" />}
             {result.total_params != null && <DetailRow label="Params" value={result.total_params.toLocaleString()} />}
             {result.dataset && <DetailRow label="Dataset" value={result.dataset} />}
             {result.pipeline && (

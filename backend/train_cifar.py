@@ -2,11 +2,12 @@
 Modular CIFAR-10 training script focused on accuracy + efficiency (Green AI).
 Features:
 - Model adapters for ResNet18, DenseNet121, MobileNetV2 adjusted for 32x32 inputs
-- Data augmentation: RandomCrop(32,padding=4), RandomHorizontalFlip, Normalize
+- Data augmentation: RandomCrop(32,padding=4), RandomHorizontalFlip, optional ColorJitter, Normalize
 - Optional Cutout and MixUp
 - SGD with momentum (0.9) and weight decay 5e-4
 - CosineAnnealingLR scheduler (T_max = epochs)
 - Label smoothing (0.1)
+- Classifier Dropout for better confidence/generalization
 - Modular: `get_model(name, ...)` to plug models easily
 
 Usage examples:
@@ -88,14 +89,17 @@ def mixup_data(x, y, alpha=1.0, device='cpu'):
 
 
 # ---------------------- Model adapters ----------------------
-def get_model(name='resnet18', pretrained=False, num_classes=10):
+def get_model(name='resnet18', pretrained=False, num_classes=10, dropout_p=0.35):
     name = name.lower()
     if name == 'resnet18':
         model = models.resnet18(pretrained=pretrained)
         # Modify first conv for CIFAR: 3x3, stride 1, padding 1
         model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
         model.maxpool = nn.Identity()  # remove 32->16 pooling
-        model.fc = nn.Linear(model.fc.in_features, num_classes)
+        model.fc = nn.Sequential(
+            nn.Dropout(p=dropout_p),
+            nn.Linear(model.fc.in_features, num_classes),
+        )
         return model
 
     if name == 'densenet121' or name == 'densenet':
@@ -105,7 +109,10 @@ def get_model(name='resnet18', pretrained=False, num_classes=10):
         # pool0 exists in torchvision densenet implementation
         if hasattr(model.features, 'pool0'):
             model.features.pool0 = nn.Identity()
-        model.classifier = nn.Linear(model.classifier.in_features, num_classes)
+        model.classifier = nn.Sequential(
+            nn.Dropout(p=dropout_p),
+            nn.Linear(model.classifier.in_features, num_classes),
+        )
         return model
 
     if name == 'mobilenetv2' or name == 'mobilenet_v2':
@@ -121,9 +128,14 @@ def get_model(name='resnet18', pretrained=False, num_classes=10):
                 pass
         # Replace classifier
         if isinstance(model.classifier, nn.Sequential):
+            if len(model.classifier) > 0 and isinstance(model.classifier[0], nn.Dropout):
+                model.classifier[0] = nn.Dropout(p=dropout_p)
             model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
         else:
-            model.classifier = nn.Linear(model.last_channel, num_classes)
+            model.classifier = nn.Sequential(
+                nn.Dropout(p=dropout_p),
+                nn.Linear(model.last_channel, num_classes),
+            )
         return model
 
     raise ValueError(f"Unsupported model: {name}")
@@ -211,6 +223,8 @@ def parse_args():
     parser.add_argument('--lr', default=0.1, type=float)
     parser.add_argument('--momentum', default=0.9, type=float)
     parser.add_argument('--weight-decay', default=5e-4, type=float)
+    parser.add_argument('--dropout', default=0.35, type=float, help='classifier dropout probability')
+    parser.add_argument('--color-jitter', default=0.15, type=float, help='color jitter strength (0 to disable)')
     parser.add_argument('--smoothing', default=0.1, type=float)
     parser.add_argument('--mixup', default=0.0, type=float, help='mixup alpha (0 to disable)')
     parser.add_argument('--cutout-length', default=0, type=int, help='cutout length (0 to disable)')
@@ -233,12 +247,26 @@ def main():
     mean = (0.4914, 0.4822, 0.4465)
     std = (0.2470, 0.2435, 0.2616)
 
-    train_transforms = [transforms.RandomCrop(32, padding=4), transforms.RandomHorizontalFlip(), transforms.ToTensor(), transforms.Normalize(mean, std)]
+    train_transforms = [
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.Resize(32),
+    ]
+    if args.color_jitter > 0:
+        cj = float(args.color_jitter)
+        train_transforms.append(
+            transforms.ColorJitter(brightness=cj, contrast=cj, saturation=max(cj * 0.75, 0.0), hue=min(cj * 0.2, 0.1))
+        )
+    train_transforms.extend([transforms.ToTensor(), transforms.Normalize(mean, std)])
     if args.cutout_length > 0:
         train_transforms.append(Cutout(args.cutout_length))
     train_transform = transforms.Compose(train_transforms)
 
-    test_transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
+    test_transform = transforms.Compose([
+        transforms.Resize(32),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
 
     # Datasets
     train_set = torchvision.datasets.CIFAR10(root=args.data_dir, train=True, download=True, transform=train_transform)
@@ -248,7 +276,12 @@ def main():
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=True)
 
     # Model
-    model = get_model(args.model, pretrained=args.pretrained, num_classes=10)
+    model = get_model(
+        args.model,
+        pretrained=args.pretrained,
+        num_classes=10,
+        dropout_p=max(0.0, min(float(args.dropout), 0.8)),
+    )
     model = model.to(device)
 
     # Criterion with label smoothing
