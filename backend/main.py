@@ -65,6 +65,7 @@ MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "uploads")
 PRETRAINED_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "pretrained_baselines")
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(BACKEND_DIR, ".."))
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "Assets")
 
 # Ensure directories
@@ -160,6 +161,8 @@ MODEL_COMPARE_FOCUS_CLASSES = {"cat", "dog"}
 MODEL_COMPARE_CONFIDENCE_DROP_ALERT_PCT = 15.0
 MODEL_COMPARE_BLUR_EDGE_THRESHOLD = 8.0
 MODEL_COMPARE_TEST_IMAGES_SUBDIR = "test-images"
+COMPARE_IMAGE_MAX_UPLOAD_MB = 10
+COMPARE_IMAGE_MAX_UPLOAD_BYTES = COMPARE_IMAGE_MAX_UPLOAD_MB * 1024 * 1024
 
 SAMPLE_CLASS_ORDER = [3, 5, 2, 0, 1, 4, 6, 7, 8, 9]
 
@@ -594,6 +597,96 @@ def _get_sample_image_by_id(sample_id: int):
         image = image.convert("RGB")
     label_idx = dataset_to_cifar_idx[int(dataset_label_idx)]
     return image, int(label_idx)
+
+
+def _path_is_within(candidate_path: str, root_path: str) -> bool:
+    try:
+        candidate_abs = os.path.abspath(candidate_path)
+        root_abs = os.path.abspath(root_path)
+        return os.path.commonpath([candidate_abs, root_abs]) == root_abs
+    except Exception:
+        return False
+
+
+def _resolve_true_label_from_path(image_path: str) -> Optional[str]:
+    parent_token = os.path.basename(os.path.dirname(image_path))
+    parent_label = _normalize_cifar10_label(parent_token)
+    if parent_label in CIFAR10_CLASSES:
+        return parent_label
+
+    filename_label = _extract_cifar10_label_from_filename(os.path.basename(image_path))
+    if filename_label in CIFAR10_CLASSES:
+        return filename_label
+
+    return None
+
+
+def _resolve_assets_image_by_path(sample_image_path: str) -> tuple[Image.Image, Optional[str], str]:
+    raw = str(sample_image_path or "").strip()
+    if not raw:
+        raise ValueError("sample_image_path is required.")
+
+    candidate = raw
+    if not os.path.isabs(candidate):
+        candidate = os.path.abspath(os.path.join(PROJECT_ROOT, candidate))
+    else:
+        candidate = os.path.abspath(candidate)
+
+    allowed_roots = {os.path.abspath(ASSETS_DIR)}
+    try:
+        allowed_roots.add(os.path.abspath(_get_assets_root()))
+    except Exception:
+        # If preferred assets root is unavailable, fall back to base Assets validation.
+        pass
+
+    if not any(_path_is_within(candidate, root) for root in allowed_roots):
+        raise ValueError("sample_image_path must point to an image inside Assets.")
+
+    if not os.path.isfile(candidate):
+        raise ValueError(f"sample_image_path does not exist: {raw}")
+
+    ext = os.path.splitext(candidate)[1].lower()
+    if ext not in ASSET_IMAGE_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported image format '{ext}'. Allowed: {sorted(ASSET_IMAGE_EXTENSIONS)}"
+        )
+
+    try:
+        with Image.open(candidate) as img:
+            image = img.convert("RGB")
+    except Exception as exc:
+        raise ValueError(f"Failed to open sample image: {exc}")
+
+    inferred_label = _resolve_true_label_from_path(candidate)
+    rel_path = os.path.relpath(candidate, PROJECT_ROOT).replace("\\", "/")
+    return image, inferred_label, rel_path
+
+
+def _decode_uploaded_image_bytes(image_bytes: bytes, filename_hint: str = "upload") -> Image.Image:
+    if not image_bytes:
+        raise ValueError("Uploaded image file is empty.")
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            return img.convert("RGB")
+    except Exception as exc:
+        raise ValueError(f"Failed to decode uploaded image '{filename_hint}': {exc}")
+
+
+def _parse_compressed_model_selection(compressed_key_raw: str) -> tuple[str, str]:
+    selected = str(compressed_key_raw or "").strip()
+    if "::" not in selected:
+        raise ValueError(
+            "Invalid compressed model selection format. Expected '<model_key>::<strategy>'."
+        )
+
+    model_key_raw, strategy_raw = selected.split("::", 1)
+    model_key = _normalize_model_key(model_key_raw)
+    strategy_key = _normalize_model_key(strategy_raw)
+
+    if not model_key or not strategy_key:
+        raise ValueError("Compressed model selection is incomplete.")
+
+    return model_key, strategy_key
 
 
 def _build_preloaded_model_architecture(model_key: str, num_classes: int = 10):
@@ -1421,6 +1514,205 @@ async def get_model_comparison_sample_images(
         return {"samples": samples}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to load sample images: {exc}")
+
+
+@app.post("/compare-image")
+@app.post("/api/compare-image")
+async def compare_image(
+    baseline_model_key: str = Form(...),
+    compressed_model_key: str = Form(...),
+    sample_image_path: Optional[str] = Form(None),
+    enable_tta: bool = Form(False),
+    image_file: Optional[UploadFile] = File(None),
+):
+    """Compare baseline vs compressed model on one sample-path or uploaded image."""
+    baseline_key = _normalize_model_key(baseline_model_key)
+    if not baseline_key:
+        raise HTTPException(status_code=400, detail="Baseline model key is required.")
+
+    try:
+        compressed_model_key_norm, compressed_strategy = _parse_compressed_model_selection(compressed_model_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    history_entry = _find_compression_history_entry(compressed_model_key_norm, compressed_strategy)
+    if history_entry is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No compression history found for model '{compressed_model_key_norm}' "
+                f"with strategy '{compressed_strategy}'."
+            ),
+        )
+
+    has_upload = image_file is not None and bool(str(image_file.filename or "").strip())
+    has_sample_path = bool(str(sample_image_path or "").strip())
+    if has_upload == has_sample_path:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide exactly one image input: image_file (upload) OR sample_image_path.",
+        )
+
+    source = "upload" if has_upload else "sample"
+    source_path = None
+    upload_filename = None
+
+    try:
+        if has_upload:
+            upload_filename = str(image_file.filename or "uploaded_image")
+            content_type = str(image_file.content_type or "").lower().strip()
+            if content_type and not content_type.startswith("image/"):
+                raise ValueError("Uploaded file must be an image (content-type image/*).")
+
+            image_bytes = await image_file.read()
+            if len(image_bytes) > COMPARE_IMAGE_MAX_UPLOAD_BYTES:
+                raise ValueError(
+                    f"Uploaded image is too large ({len(image_bytes)} bytes). "
+                    f"Maximum allowed is {COMPARE_IMAGE_MAX_UPLOAD_MB} MB."
+                )
+
+            image = _decode_uploaded_image_bytes(image_bytes, upload_filename)
+            inferred_true_label = _extract_cifar10_label_from_filename(upload_filename)
+        else:
+            image, inferred_true_label, source_path = _resolve_assets_image_by_path(str(sample_image_path))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to load image input: {exc}")
+
+    preferred_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu") if compressed_strategy == "quantization" else preferred_device
+
+    try:
+        baseline_model = _load_baseline_model_for_comparison(baseline_key, device=device)
+    except Exception as exc:
+        if device.type != "cuda":
+            raise HTTPException(status_code=500, detail=f"Failed to load baseline model: {exc}")
+        try:
+            device = torch.device("cpu")
+            baseline_model = _load_baseline_model_for_comparison(baseline_key, device=device)
+        except Exception as cpu_exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load baseline model: {cpu_exc}")
+
+    try:
+        compressed_model, compressed_artifact = _load_compressed_model_for_comparison(
+            compressed_model_key_norm,
+            compressed_strategy,
+            device=device,
+        )
+    except Exception as exc:
+        if device.type != "cuda":
+            raise HTTPException(status_code=500, detail=f"Failed to load compressed model: {exc}")
+        try:
+            device = torch.device("cpu")
+            baseline_model = _load_baseline_model_for_comparison(baseline_key, device=device)
+            compressed_model, compressed_artifact = _load_compressed_model_for_comparison(
+                compressed_model_key_norm,
+                compressed_strategy,
+                device=device,
+            )
+        except Exception as cpu_exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load compressed model: {cpu_exc}")
+
+    baseline_pred = _predict_model_on_asset_images_batch(
+        baseline_model,
+        [image],
+        device=device,
+        enable_tta=bool(enable_tta),
+    )[0]
+    compressed_pred = _predict_model_on_asset_images_batch(
+        compressed_model,
+        [image],
+        device=device,
+        enable_tta=bool(enable_tta),
+    )[0]
+
+    confidence_delta = round(
+        float(compressed_pred.get("confidence", 0.0)) - float(baseline_pred.get("confidence", 0.0)),
+        2,
+    )
+    prediction_match = int(baseline_pred.get("predicted_index", -1)) == int(compressed_pred.get("predicted_index", -1))
+
+    true_label = inferred_true_label if inferred_true_label in CIFAR10_CLASSES else None
+    true_label_index = CIFAR10_CLASSES.index(true_label) if true_label in CIFAR10_CLASSES else None
+
+    baseline_correct = None
+    compressed_correct = None
+    if true_label_index is not None:
+        baseline_correct = int(baseline_pred.get("predicted_index", -1)) == int(true_label_index)
+        compressed_correct = int(compressed_pred.get("predicted_index", -1)) == int(true_label_index)
+
+    diag_label = true_label if true_label is not None else "unknown"
+    case_diagnostics = _build_comparison_case_diagnostics(
+        sample_id=-1,
+        true_label=diag_label,
+        baseline_pred=baseline_pred,
+        compressed_pred=compressed_pred,
+    )
+
+    quality_warnings = sorted(set(
+        list(baseline_pred.get("quality_warnings") or []) +
+        list(compressed_pred.get("quality_warnings") or [])
+    ))
+
+    mismatch_warning = None
+    if not prediction_match:
+        mismatch_warning = (
+            f"Baseline predicted '{baseline_pred.get('predicted_class')}', while compressed predicted "
+            f"'{compressed_pred.get('predicted_class')}'."
+        )
+
+    return {
+        "input": {
+            "source": source,
+            "sample_image_path": source_path,
+            "upload_filename": upload_filename,
+            "true_label": true_label,
+            "image_data_url": _pil_image_to_data_url(image, display_size=CIFAR10_DISPLAY_SIZE),
+        },
+        "baseline": {
+            "model_key": baseline_key,
+            "class": baseline_pred.get("predicted_class"),
+            "confidence": baseline_pred.get("confidence"),
+            "top3": baseline_pred.get("top_k", []),
+            "prediction": baseline_pred,
+        },
+        "compressed": {
+            "model_key": compressed_model_key_norm,
+            "strategy": compressed_strategy,
+            "class": compressed_pred.get("predicted_class"),
+            "confidence": compressed_pred.get("confidence"),
+            "top3": compressed_pred.get("top_k", []),
+            "prediction": compressed_pred,
+            "artifact": os.path.basename(compressed_artifact),
+        },
+        "comparison": {
+            "prediction_match": bool(prediction_match),
+            "prediction_mismatch_warning": mismatch_warning,
+            "confidence_delta_percent": confidence_delta,
+            "confidence_drop_alert": bool(case_diagnostics.get("significant_confidence_drop", False)),
+            "confidence_drop_threshold_percent": MODEL_COMPARE_CONFIDENCE_DROP_ALERT_PCT,
+            "baseline_correct": baseline_correct,
+            "compressed_correct": compressed_correct,
+        },
+        "diagnostics": {
+            "case": case_diagnostics,
+            "quality_warnings": quality_warnings,
+        },
+        "preprocessing": {
+            "resize": "model_native",
+            "baseline_input_size": int(baseline_pred.get("input_size", _get_model_input_size(baseline_model))),
+            "compressed_input_size": int(compressed_pred.get("input_size", _get_model_input_size(compressed_model))),
+            "normalize_mean": list(CIFAR10_MEAN),
+            "normalize_std": list(CIFAR10_STD),
+            "tta_enabled": bool(enable_tta),
+            "tta_variants": int(max(
+                int(baseline_pred.get("tta_variants", 1)),
+                int(compressed_pred.get("tta_variants", 1)),
+            )),
+        },
+        "device": str(device),
+    }
 
 
 @app.post("/api/model-comparison/compare")

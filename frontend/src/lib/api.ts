@@ -625,6 +625,87 @@ export async function compareModelsOnBatch(payload: {
   return postAPI('/api/model-comparison/compare-batch', payload);
 }
 
+export interface CompareImageClassPrediction {
+  class_name: string;
+  class_index: number;
+  probability: number;
+}
+
+export interface CompareImageModelResult {
+  model_key: string;
+  strategy?: string;
+  class: string;
+  confidence: number;
+  top3: CompareImageClassPrediction[];
+  prediction: ModelComparisonPrediction;
+}
+
+export interface CompareImageResponse {
+  input: {
+    source: 'sample' | 'upload';
+    sample_image_path?: string | null;
+    upload_filename?: string | null;
+    true_label?: string | null;
+    image_data_url: string;
+  };
+  baseline: CompareImageModelResult;
+  compressed: CompareImageModelResult;
+  comparison: {
+    prediction_match: boolean;
+    prediction_mismatch_warning?: string | null;
+    confidence_delta_percent: number;
+    confidence_drop_alert: boolean;
+    confidence_drop_threshold_percent: number;
+    baseline_correct?: boolean | null;
+    compressed_correct?: boolean | null;
+  };
+  diagnostics?: {
+    case?: Record<string, any>;
+    quality_warnings?: string[];
+  };
+  preprocessing?: {
+    resize?: string;
+    baseline_input_size?: number;
+    compressed_input_size?: number;
+    normalize_mean?: number[];
+    normalize_std?: number[];
+    tta_enabled?: boolean;
+    tta_variants?: number;
+  };
+  device?: string;
+}
+
+export async function compareImage(payload: {
+  baseline_model_key: string;
+  compressed_model_key: string;
+  sample_image_path?: string;
+  image_file?: File;
+  enable_tta?: boolean;
+}): Promise<CompareImageResponse> {
+  const formData = new FormData();
+  formData.append('baseline_model_key', payload.baseline_model_key);
+  formData.append('compressed_model_key', payload.compressed_model_key);
+  formData.append('enable_tta', String(Boolean(payload.enable_tta)));
+
+  if (payload.sample_image_path) {
+    formData.append('sample_image_path', payload.sample_image_path);
+  }
+  if (payload.image_file) {
+    formData.append('image_file', payload.image_file);
+  }
+
+  const res = await fetch(`${API_BASE}/compare-image`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!res.ok) {
+    throw new Error(await readApiError(res));
+  }
+
+  return res.json();
+}
+
 // ============================================================
 // localStorage persistence for compression results
 // ============================================================

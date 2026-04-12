@@ -57,27 +57,6 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
     ? `Compression Analysis — ${modelName}`
     : 'Compression Analysis';
 
-  if (!strategies.length) {
-    return (
-      <div className="card">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">{title}</h3>
-        <div className="h-60 flex items-center justify-center">
-          <div className="text-center">
-            <div className="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center mx-auto mb-3">
-              <span className="text-gray-400 text-xl">📊</span>
-            </div>
-            <p className="text-sm text-gray-500">Run a model to see CO2 comparison</p>
-            <p className="text-xs text-gray-400 mt-1">
-              {modelName
-                ? 'Run a compression method above to see results here'
-                : 'Select a model and compress it to see analysis'}
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   const sizeData = strategies.map(s => ({
     name: s.name.replace(/[→·]/g, '').substring(0, 20),
     'Size (MB)': s.size_MB,
@@ -122,6 +101,27 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
       );
     }
   }, [carbonData]);
+
+  if (!strategies.length) {
+    return (
+      <div className="card">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">{title}</h3>
+        <div className="h-60 flex items-center justify-center">
+          <div className="text-center">
+            <div className="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center mx-auto mb-3">
+              <span className="text-gray-400 text-xl">📊</span>
+            </div>
+            <p className="text-sm text-gray-500">Run a model to see CO2 comparison</p>
+            <p className="text-xs text-gray-400 mt-1">
+              {modelName
+                ? 'Run a compression method above to see results here'
+                : 'Select a model and compress it to see analysis'}
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const radarData = strategies
     .filter(s => s.key !== 'baseline')

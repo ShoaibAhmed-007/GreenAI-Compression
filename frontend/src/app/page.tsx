@@ -12,8 +12,8 @@ import { StatsCards } from '@/components/StatsCards';
 import { ComparisonTable } from '@/components/ComparisonTable';
 import { CompressionChart } from '@/components/CompressionChart';
 import { EnergySection } from '@/components/EnergySection';
-import { ModelGrid } from '@/components/ModelGrid';
-import { ModelDashboard } from '../components/ModelDashboard';
+import { ModelSelector } from '@/components/ModelSelector';
+import { CompressionDialog } from '@/components/CompressionDialog';
 import { PreparePanel } from '@/components/PreparePanel';
 
 export default function Home() {
@@ -23,6 +23,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [savedResults, setSavedResults] = useState<DynamicResult[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [isCompressionDialogOpen, setCompressionDialogOpen] = useState(false);
 
   const normalizeModelKey = useCallback((result: DynamicResult): string => {
     const key = (result.model_key || result.model_name || '').trim().toLowerCase();
@@ -84,11 +85,13 @@ export default function Home() {
     setSavedResults([]);
     clearSavedResults();
     setSelectedModel(null);
+    setCompressionDialogOpen(false);
   }, []);
 
   useEffect(() => {
     if (selectedModel && baselines && !baselines.models[selectedModel]) {
       setSelectedModel(null);
+      setCompressionDialogOpen(false);
     }
   }, [selectedModel, baselines]);
 
@@ -258,24 +261,24 @@ export default function Home() {
 
       {/* Model Grid */}
       {baselines && (
-        <ModelGrid
+        <ModelSelector
           models={baselines.models}
           selectedModel={selectedModel}
-          onSelectModel={(key) => setSelectedModel(selectedModel === key ? null : key)}
+          onSelectModel={(key) => {
+            setSelectedModel(key);
+            setCompressionDialogOpen(true);
+          }}
           compressionCounts={compressionCounts}
         />
       )}
 
-      {/* Selected Model Dashboard */}
-      {selectedModel && baselines?.models[selectedModel] && (
-        <ModelDashboard
-          model={baselines.models[selectedModel]}
-          modelKey={selectedModel}
-          compressionResults={getResultsForModel(selectedModel)}
-          onNewResult={handleNewResult}
-          onClose={() => setSelectedModel(null)}
-        />
-      )}
+      {/* Compression Dialog */}
+      <CompressionDialog
+        open={Boolean(isCompressionDialogOpen && selectedModel && baselines?.models[selectedModel])}
+        modelKey={selectedModel}
+        model={selectedModel && baselines?.models[selectedModel] ? baselines.models[selectedModel] : null}
+        onClose={() => setCompressionDialogOpen(false)}
+      />
 
       {/* Compression Analysis (selected model only) + Strategy Comparison (all results) */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
