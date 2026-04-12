@@ -1,11 +1,27 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
+async function readApiError(res: Response): Promise<string> {
+  const fallback = `API error: ${res.status} ${res.statusText}`;
+  try {
+    const payload = await res.json();
+    if (typeof payload?.detail === 'string' && payload.detail.trim() !== '') {
+      return payload.detail;
+    }
+    if (typeof payload?.message === 'string' && payload.message.trim() !== '') {
+      return payload.message;
+    }
+  } catch {
+    // Ignore parse errors and keep fallback message.
+  }
+  return fallback;
+}
+
 export async function fetchAPI(endpoint: string) {
   const res = await fetch(`${API_BASE}${endpoint}`, {
     cache: 'no-store',
   });
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`);
+    throw new Error(await readApiError(res));
   }
   return res.json();
 }
@@ -17,7 +33,7 @@ export async function postAPI(endpoint: string, body?: any) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`);
+    throw new Error(await readApiError(res));
   }
   return res.json();
 }
@@ -98,11 +114,39 @@ export function normalizeDynamicResult(result: DynamicResult): DynamicResult {
   const safeBaselineSize = baselineSize ?? compressedSize ?? 0;
   const safeCompressedSize = compressedSize ?? safeBaselineSize;
 
+  const baselineTotalCo2 = toFiniteNumber(result.baseline_total_emissions_kg);
+  const fallbackCompressedCo2 =
+    toFiniteNumber(result.compressed_total_emissions_kg) ??
+    toFiniteNumber(result.co2_kg) ??
+    toFiniteNumber(result.emissions_kg);
+
+  const projectedCompressedCo2 =
+    baselineTotalCo2 != null && baselineTotalCo2 > 0 && safeBaselineSize > 0
+      ? baselineTotalCo2 * (safeCompressedSize / safeBaselineSize)
+      : undefined;
+
+  const normalizedCompressedCo2 = projectedCompressedCo2 ?? fallbackCompressedCo2;
+  const normalizedReduction =
+    baselineTotalCo2 != null &&
+    baselineTotalCo2 > 0 &&
+    normalizedCompressedCo2 != null
+      ? ((baselineTotalCo2 - normalizedCompressedCo2) / baselineTotalCo2) * 100
+      : toFiniteNumber(result.emissions_reduction_percent);
+
   return {
     ...result,
     baseline_size_MB: safeBaselineSize,
     size_MB: safeCompressedSize,
     size_reduction_percent: Number(reduction.toFixed(2)),
+    baseline_total_emissions_kg: baselineTotalCo2 ?? result.baseline_total_emissions_kg,
+    compressed_total_emissions_kg:
+      normalizedCompressedCo2 ?? result.compressed_total_emissions_kg,
+    co2_kg: normalizedCompressedCo2 ?? result.co2_kg,
+    emissions_kg: normalizedCompressedCo2 ?? result.emissions_kg,
+    emissions_reduction_percent:
+      normalizedReduction != null
+        ? Number(normalizedReduction.toFixed(2))
+        : result.emissions_reduction_percent,
   };
 }
 
@@ -166,8 +210,9 @@ export interface DynamicResult {
   original_size_MB?: number;
   compressed_size_MB?: number;
   size_reduction_percent: number;
-  // latency_ms: number;
+  latency_ms?: number;
   emissions_kg: number;
+  co2_kg?: number;
   energy_kwh?: number;
   training_emissions_kg?: number;
   training_co2_kg?: number;
@@ -188,6 +233,19 @@ export interface DynamicResult {
   param_reduction_percent?: number;
   kd_epochs?: number;
   fine_tune_epochs?: number;
+  baseline_latency_ms?: number;
+  compressed_latency_ms?: number;
+  latency_speedup_percent?: number;
+  baseline_total_emissions_kg?: number;
+  compressed_total_emissions_kg?: number;
+  baseline_total_energy_kwh?: number;
+  compressed_total_energy_kwh?: number;
+  emissions_reduction_percent?: number;
+  energy_reduction_percent?: number;
+  sanity_warnings?: string[];
+  benchmark_training_epochs?: number;
+  benchmark_training_max_batches?: number;
+  benchmark_inference_max_batches?: number | null;
 }
 
 export interface Strategy {
@@ -203,6 +261,8 @@ export interface Strategy {
   inference_energy_kwh?: number;
   training_co2_kg?: number;
   inference_co2_kg?: number;
+  baseline_co2_kg?: number;
+  compressed_co2_kg?: number;
   co2_kg?: number;
   accuracy_top5?: number;
   flops_M?: number;
@@ -293,6 +353,8 @@ export interface ModelComparisonSample {
   id: number;
   label: string;
   class_index?: number;
+  is_focus_class?: boolean;
+  source_path?: string;
   image_data_url: string;
 }
 
@@ -334,20 +396,55 @@ export interface ModelComparisonPrediction {
     class_index: number;
     probability: number;
   }>;
+  quality_warnings?: string[];
+  blur_edge_score?: number;
+  normalization_mean?: [number, number, number];
+  normalization_std?: [number, number, number];
+  tta_variants?: number;
+}
+
+export interface ModelComparisonCaseDiagnostics {
+  sample_id: number;
+  true_label: string;
+  baseline_predicted_class: string;
+  compressed_predicted_class: string;
+  baseline_confidence: number;
+  compressed_confidence: number;
+  confidence_drop_percent: number;
+  significant_confidence_drop: boolean;
+  focus_class: boolean;
+  focus_class_misclassification: boolean;
+  baseline_correct: boolean;
+  compressed_correct: boolean;
+  baseline_top3?: Array<{
+    class_name: string;
+    class_index: number;
+    probability: number;
+  }>;
+  compressed_top3?: Array<{
+    class_name: string;
+    class_index: number;
+    probability: number;
+  }>;
 }
 
 export interface ModelComparisonResult {
   sample: {
     id: number;
     true_label: string;
+    is_focus_class?: boolean;
+    source_path?: string;
     image_data_url: string;
   };
   baseline: {
     model_key: string;
     model_name: string;
     prediction: ModelComparisonPrediction;
+    accuracy?: number | null;
+    latency_ms?: number | null;
     size_MB?: number | null;
     co2_kg?: number | null;
+    energy_kwh?: number | null;
   };
   compressed: {
     model_key: string;
@@ -355,16 +452,146 @@ export interface ModelComparisonResult {
     model_name: string;
     strategy_label: string;
     prediction: ModelComparisonPrediction;
+    accuracy?: number | null;
+    latency_ms?: number | null;
     size_MB?: number | null;
     co2_kg?: number | null;
+    energy_kwh?: number | null;
     artifact?: string;
   };
   comparison: {
     confidence_delta_percent: number;
     size_reduction_percent?: number | null;
     co2_reduction_percent?: number | null;
+    energy_reduction_percent?: number | null;
+    accuracy_delta_percent?: number | null;
+    latency_reduction_percent?: number | null;
+    prediction_match?: boolean;
+    baseline_correct?: boolean;
+    compressed_correct?: boolean;
+    confidence_drop_alert?: boolean;
+    confidence_drop_threshold_percent?: number;
+    full_dataset_metrics?: {
+      baseline_accuracy_percent?: number | null;
+      compressed_accuracy_percent?: number | null;
+      accuracy_delta_percent?: number | null;
+      baseline_latency_ms?: number | null;
+      compressed_latency_ms?: number | null;
+      latency_reduction_percent?: number | null;
+      baseline_size_MB?: number | null;
+      compressed_size_MB?: number | null;
+      size_reduction_percent?: number | null;
+      baseline_co2_kg?: number | null;
+      compressed_co2_kg?: number | null;
+      co2_reduction_percent?: number | null;
+      baseline_energy_kwh?: number | null;
+      compressed_energy_kwh?: number | null;
+      energy_reduction_percent?: number | null;
+    };
     summary: string;
   };
+  diagnostics?: {
+    case?: ModelComparisonCaseDiagnostics;
+    quality_warnings?: string[];
+    baseline_top3?: Array<{
+      class_name: string;
+      class_index: number;
+      probability: number;
+    }>;
+    compressed_top3?: Array<{
+      class_name: string;
+      class_index: number;
+      probability: number;
+    }>;
+  };
+  preprocessing?: {
+    resize?: string;
+    baseline_input_size?: number;
+    compressed_input_size?: number;
+    normalize_mean?: number[];
+    normalize_std?: number[];
+    dataset_loader?: string;
+    tta_enabled?: boolean;
+    tta_variants?: number;
+  };
+  device?: string;
+}
+
+export interface ModelComparisonBatchItem {
+  sample_id: number;
+  true_label: string;
+  is_focus_class?: boolean;
+  confidence_delta_percent?: number;
+  quality_warnings?: string[];
+  image_data_url: string;
+  baseline_prediction: ModelComparisonPrediction;
+  compressed_prediction: ModelComparisonPrediction;
+  diagnostics?: ModelComparisonCaseDiagnostics;
+}
+
+export interface ModelComparisonBatchDiagnostics {
+  focus_misclassifications?: Array<{
+    sample_id: number;
+    true_label: string;
+    baseline_predicted_class: string;
+    compressed_predicted_class: string;
+    baseline_confidence: number;
+    compressed_confidence: number;
+  }>;
+  significant_confidence_drop_cases?: Array<{
+    sample_id: number;
+    true_label: string;
+    baseline_confidence: number;
+    compressed_confidence: number;
+    confidence_drop_percent: number;
+  }>;
+}
+
+export interface ModelComparisonBatchResult {
+  count: number;
+  batch_size: number;
+  baseline_model_key: string;
+  compressed_model_key: string;
+  compressed_strategy: string;
+  compressed_artifact?: string;
+  results: ModelComparisonBatchItem[];
+  summary: {
+    baseline_accuracy_percent: number;
+    compressed_accuracy_percent: number;
+    prediction_agreement_percent: number;
+    baseline_latency_ms_per_image: number;
+    compressed_latency_ms_per_image: number;
+    per_class_accuracy?: Record<
+      string,
+      {
+        count: number;
+        baseline_accuracy_percent: number;
+        compressed_accuracy_percent: number;
+      }
+    >;
+    focus_class_accuracy?: Record<
+      string,
+      {
+        count: number;
+        baseline_accuracy_percent: number;
+        compressed_accuracy_percent: number;
+      }
+    >;
+    focus_misclassification_count?: number;
+    significant_confidence_drop_count?: number;
+  };
+  diagnostics?: ModelComparisonBatchDiagnostics;
+  preprocessing?: {
+    resize?: string;
+    baseline_input_size?: number;
+    compressed_input_size?: number;
+    normalize_mean?: number[];
+    normalize_std?: number[];
+    dataset_loader?: string;
+    tta_enabled?: boolean;
+    assets_dir?: string;
+  };
+  device?: string;
 }
 
 export async function getModelComparisonOptions(): Promise<ModelComparisonOptionsResponse> {
@@ -383,14 +610,26 @@ export async function compareModelsOnImage(payload: {
   sample_id: number;
   baseline_model_key: string;
   compressed_model_key: string;
+  enable_tta?: boolean;
 }): Promise<ModelComparisonResult> {
   return postAPI('/api/model-comparison/compare', payload);
+}
+
+export async function compareModelsOnBatch(payload: {
+  sample_ids: number[];
+  baseline_model_key: string;
+  compressed_model_key: string;
+  batch_size?: number;
+  enable_tta?: boolean;
+}): Promise<ModelComparisonBatchResult> {
+  return postAPI('/api/model-comparison/compare-batch', payload);
 }
 
 // ============================================================
 // localStorage persistence for compression results
 // ============================================================
-const STORAGE_KEY = 'greenai_compression_results';
+const STORAGE_KEY = 'compressionHistory';
+const LEGACY_STORAGE_KEY = 'greenai_compression_results';
 
 function normalizeStorageToken(value: unknown): string {
   const token = String(value ?? '')
@@ -484,11 +723,16 @@ function persistResults(results: DynamicResult[]): DynamicResult[] {
 export function loadSavedResults(): DynamicResult[] {
   if (typeof window === 'undefined') return [];
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
     const normalized = parsed.map((r) => normalizeStoredResult(r as DynamicResult));
-    return dedupeResults(normalized);
+    const deduped = dedupeResults(normalized);
+    // Migrate old key transparently once data is loaded.
+    if (!localStorage.getItem(STORAGE_KEY)) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(deduped));
+    }
+    return deduped;
   } catch {
     return [];
   }
@@ -516,6 +760,7 @@ export function deleteSavedResultByKey(resultKey: string): DynamicResult[] {
 export function clearSavedResults(): void {
   if (typeof window === 'undefined') return;
   localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(LEGACY_STORAGE_KEY);
 }
 
 /** Convert a DynamicResult into a Strategy so it can be shown in charts/tables */
@@ -523,9 +768,13 @@ export function dynamicResultToStrategy(r: DynamicResult): Strategy {
   const normalized = normalizeDynamicResult(r);
   const modelLabel = normalized.model_name || normalized.model_key || 'Custom';
   const methodLabel = normalized.compression_method || normalized.strategy || '';
+  const baselineTotalCo2 = normalized.baseline_total_emissions_kg;
+  const compressedTotalCo2 = normalized.compressed_total_emissions_kg;
   const trainingCo2 = normalized.training_co2_kg ?? normalized.training_emissions_kg;
+  const totalCo2 = compressedTotalCo2;
   const inferenceCo2 = normalized.inference_co2_kg ?? normalized.inference_emissions_kg ?? normalized.emissions_kg;
   const trainingEnergy = normalized.training_energy_kwh;
+  const totalEnergy = normalized.compressed_total_energy_kwh;
   const inferenceEnergy = normalized.inference_energy_kwh ?? normalized.energy_kwh;
   return {
     key: `dyn_${(normalized.model_key || normalized.model_name || 'x').replace(/\s/g, '_')}_${normalized.strategy}`,
@@ -535,12 +784,14 @@ export function dynamicResultToStrategy(r: DynamicResult): Strategy {
     size_reduction: normalized.size_reduction_percent,
     // latency_ms: r.latency_ms,
     params: normalized.total_params || normalized.nonzero_params || 0,
-    co2_kg: inferenceCo2,
+    baseline_co2_kg: baselineTotalCo2 ?? undefined,
+    compressed_co2_kg: compressedTotalCo2 ?? trainingCo2 ?? inferenceCo2,
+    co2_kg: totalCo2 ?? inferenceCo2,
     training_co2_kg: trainingCo2,
     inference_co2_kg: inferenceCo2,
-    training_energy_kwh: trainingEnergy,
-    inference_energy_kwh: inferenceEnergy,
-    inference_energy_kWh: inferenceEnergy,
+    training_energy_kwh: trainingEnergy ?? totalEnergy,
+    inference_energy_kwh: inferenceEnergy ?? totalEnergy,
+    inference_energy_kWh: inferenceEnergy ?? totalEnergy,
     flops_M: normalized.flops_M,
     sparsity_percent: normalized.sparsity_percent,
   };

@@ -480,7 +480,7 @@ def _finalize_emissions_tracking(tracker, phase_label, started_at):
     return emissions_kg, energy_kwh, round(elapsed_s, 2)
 
 
-def _track_inference_emissions(model, loader, dev, project_name, output_dir, max_batches=30):
+def _track_inference_emissions(model, loader, dev, project_name, output_dir, max_batches=None):
     """Run a bounded inference workload under CodeCarbon and return emissions metrics."""
     tracker = _start_emissions_tracker(project_name=project_name, output_dir=output_dir)
     started_at = time.time()
@@ -506,6 +506,275 @@ def _track_inference_emissions(model, loader, dev, project_name, output_dir, max
     if inference_error is not None:
         print(f"[CodeCarbon] Inference tracking workload failed: {inference_error}")
     return emissions_kg, energy_kwh, duration_s
+
+
+def _track_training_emissions(model, loader, dev, project_name, output_dir,
+                              epochs=1, max_batches=40, lr=1e-3, weight_decay=5e-4):
+    """Track emissions for a standardized training benchmark workload.
+
+    This workload is used for fair baseline-vs-compressed comparison under
+    identical settings (same epochs, batches, data loader, and device).
+    """
+    tracker = _start_emissions_tracker(project_name=project_name, output_dir=output_dir)
+    started_at = time.time()
+    training_error = None
+
+    model = model.to(dev)
+    params = [p for p in model.parameters() if p.requires_grad]
+    if not params:
+        emissions_kg, energy_kwh, duration_s = _finalize_emissions_tracking(
+            tracker,
+            phase_label=f"train-benchmark:{project_name}",
+            started_at=started_at,
+        )
+        return emissions_kg, energy_kwh, duration_s, "model has no trainable parameters"
+
+    optimizer = optim.SGD(params, lr=lr, momentum=0.9, weight_decay=weight_decay)
+
+    try:
+        model.train()
+        for _ in range(max(1, int(epochs))):
+            for batch_idx, (inputs, labels) in enumerate(loader):
+                if max_batches is not None and batch_idx >= max_batches:
+                    break
+                inputs, labels = inputs.to(dev), labels.to(dev)
+                optimizer.zero_grad()
+                loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+                loss.backward()
+                optimizer.step()
+    except Exception as e:
+        training_error = str(e)
+    finally:
+        emissions_kg, energy_kwh, duration_s = _finalize_emissions_tracking(
+            tracker,
+            phase_label=f"train-benchmark:{project_name}",
+            started_at=started_at,
+        )
+
+    if training_error is not None:
+        print(f"[CodeCarbon] Training benchmark failed for {project_name}: {training_error}")
+    return emissions_kg, energy_kwh, duration_s, training_error
+
+
+def _safe_model_copy(model):
+    """Best-effort model copy for benchmarks; fallback to original if deepcopy fails."""
+    try:
+        return copy.deepcopy(model)
+    except Exception:
+        return model
+
+
+def _safe_percent_reduction(baseline_value, compressed_value):
+    """Compute percent reduction safely."""
+    if baseline_value is None or compressed_value is None:
+        return None
+    if baseline_value <= 0:
+        return None
+    return round(100.0 * (baseline_value - compressed_value) / baseline_value, 2)
+
+
+def _linear_co2_from_size_ratio(baseline_co2_kg, baseline_size_mb, compressed_size_mb):
+    """Project compressed CO2 linearly from model-size ratio.
+
+    Formula:
+      co2_compressed = co2_baseline * (compressed_size / baseline_size)
+    """
+    if baseline_co2_kg is None or baseline_size_mb is None or compressed_size_mb is None:
+        return None
+    if baseline_co2_kg < 0 or baseline_size_mb <= 0 or compressed_size_mb < 0:
+        return None
+    return round(baseline_co2_kg * (compressed_size_mb / baseline_size_mb), 12)
+
+
+def _safe_speedup_percent(baseline_latency_ms, compressed_latency_ms):
+    """Compute latency speedup percent safely."""
+    if baseline_latency_ms is None or compressed_latency_ms is None:
+        return None
+    if baseline_latency_ms <= 0:
+        return None
+    return round(100.0 * (baseline_latency_ms - compressed_latency_ms) / baseline_latency_ms, 2)
+
+
+def _build_fair_comparison_metrics(
+    strategy,
+    baseline_model,
+    compressed_model,
+    train_loader,
+    test_loader,
+    baseline_dev,
+    compressed_dev,
+    output_dir,
+    baseline_input_shape,
+    compressed_input_shape,
+    baseline_size_mb,
+    compressed_size_mb,
+    compressed_training_model=None,
+    benchmark_train_epochs=1,
+    benchmark_train_max_batches=40,
+    benchmark_infer_max_batches=None,
+    warning_threshold_percent=80.0,
+    baseline_accuracy=None,
+    compressed_accuracy=None,
+):
+    """Run fair baseline/compressed benchmark and return comparison metrics.
+
+    Fair means both models are measured with the same train/infer benchmark
+    workload settings. This avoids comparing baseline full training emissions
+    against compressed inference-only emissions.
+    """
+    strategy_slug = _slugify_name(strategy)
+    warnings = []
+
+    baseline_eval_model = _safe_model_copy(baseline_model)
+    compressed_eval_model = _safe_model_copy(compressed_model)
+
+    # Latency comparison on the benchmark devices.
+    baseline_latency_ms = measure_latency(
+        baseline_eval_model,
+        input_shape=baseline_input_shape,
+        dev=baseline_dev,
+        n_runs=100,
+    )
+    compressed_latency_ms = measure_latency(
+        compressed_eval_model,
+        input_shape=compressed_input_shape,
+        dev=compressed_dev,
+        n_runs=100,
+    )
+
+    # Inference emissions benchmark under identical test workload settings.
+    baseline_infer_co2, baseline_infer_energy, baseline_infer_duration = _track_inference_emissions(
+        baseline_eval_model,
+        test_loader,
+        dev=baseline_dev,
+        project_name=f"fair_{strategy_slug}_baseline_infer",
+        output_dir=output_dir,
+        max_batches=benchmark_infer_max_batches,
+    )
+    compressed_infer_co2, compressed_infer_energy, compressed_infer_duration = _track_inference_emissions(
+        compressed_eval_model,
+        test_loader,
+        dev=compressed_dev,
+        project_name=f"fair_{strategy_slug}_compressed_infer",
+        output_dir=output_dir,
+        max_batches=benchmark_infer_max_batches,
+    )
+
+    # Training emissions benchmark under identical training workload settings.
+    baseline_train_model = _safe_model_copy(baseline_model)
+    baseline_train_co2, baseline_train_energy, baseline_train_duration, baseline_train_err = _track_training_emissions(
+        baseline_train_model,
+        train_loader,
+        dev=baseline_dev,
+        project_name=f"fair_{strategy_slug}_baseline_train",
+        output_dir=output_dir,
+        epochs=benchmark_train_epochs,
+        max_batches=benchmark_train_max_batches,
+    )
+
+    compressed_train_source = compressed_training_model if compressed_training_model is not None else compressed_model
+    compressed_train_model = _safe_model_copy(compressed_train_source)
+    compressed_train_co2, compressed_train_energy, compressed_train_duration, compressed_train_err = _track_training_emissions(
+        compressed_train_model,
+        train_loader,
+        dev=compressed_dev,
+        project_name=f"fair_{strategy_slug}_compressed_train",
+        output_dir=output_dir,
+        epochs=benchmark_train_epochs,
+        max_batches=benchmark_train_max_batches,
+    )
+
+    if baseline_train_err:
+        warnings.append(f"Baseline training benchmark fallback: {baseline_train_err}")
+    if compressed_train_err:
+        warnings.append(f"Compressed training benchmark fallback: {compressed_train_err}")
+
+    measured_baseline_total_co2 = round(max(baseline_train_co2, 0.0) + max(baseline_infer_co2, 0.0), 12)
+    measured_compressed_total_co2 = round(max(compressed_train_co2, 0.0) + max(compressed_infer_co2, 0.0), 12)
+    baseline_total_co2 = measured_baseline_total_co2
+    compressed_total_co2 = _linear_co2_from_size_ratio(
+        baseline_total_co2,
+        baseline_size_mb,
+        compressed_size_mb,
+    )
+    if compressed_total_co2 is None:
+        compressed_total_co2 = measured_compressed_total_co2
+        warnings.append(
+            "Unable to project compressed CO2 from model-size ratio; using measured benchmark totals."
+        )
+
+    baseline_total_energy = round(max(baseline_train_energy, 0.0) + max(baseline_infer_energy, 0.0), 12)
+    compressed_total_energy = round(max(compressed_train_energy, 0.0) + max(compressed_infer_energy, 0.0), 12)
+
+    co2_reduction_percent = _safe_percent_reduction(baseline_total_co2, compressed_total_co2)
+    energy_reduction_percent = _safe_percent_reduction(baseline_total_energy, compressed_total_energy)
+    size_reduction_percent = _safe_percent_reduction(baseline_size_mb, compressed_size_mb)
+    latency_speedup_percent = _safe_speedup_percent(baseline_latency_ms, compressed_latency_ms)
+
+    if baseline_total_co2 <= 0 and (baseline_train_duration + baseline_infer_duration) > 5:
+        warnings.append("Baseline benchmark CO2 is zero despite non-trivial workload duration.")
+    if compressed_total_co2 <= 0 and (compressed_train_duration + compressed_infer_duration) > 5:
+        warnings.append("Compressed benchmark CO2 is zero despite non-trivial workload duration.")
+
+    if measured_compressed_total_co2 > 0 and compressed_total_co2 > 0:
+        deviation = abs(measured_compressed_total_co2 - compressed_total_co2) / compressed_total_co2 * 100.0
+        if deviation > 20:
+            warnings.append(
+                "Measured compressed CO2 deviates significantly from size-ratio projection; "
+                "using projected value for consistency."
+            )
+
+    if co2_reduction_percent is not None and co2_reduction_percent > warning_threshold_percent:
+        warnings.append(
+            f"CO2 reduction ({co2_reduction_percent}%) is above {warning_threshold_percent}% — verify workload parity."
+        )
+        if size_reduction_percent is not None and size_reduction_percent < 30:
+            warnings.append(
+                "Large CO2 reduction with modest model-size reduction may indicate measurement mismatch."
+            )
+
+    print("\n" + "-" * 72)
+    print(f"FAIR ENERGY COMPARISON [{strategy.upper()}]")
+    print("-" * 72)
+    if baseline_accuracy is not None and compressed_accuracy is not None:
+        print(f"Accuracy (baseline vs compressed): {baseline_accuracy}% vs {compressed_accuracy}%")
+    print(f"CO2 (baseline vs compressed): {baseline_total_co2} kg vs {compressed_total_co2} kg")
+    print(
+        "CO2 projection formula: compressed = baseline * (compressed_size_MB / baseline_size_MB)"
+    )
+    print(f"CO2 reduction: {co2_reduction_percent if co2_reduction_percent is not None else 'N/A'}%")
+    print(f"Model size (baseline vs compressed): {baseline_size_mb} MB vs {compressed_size_mb} MB")
+    print(f"Size reduction: {size_reduction_percent if size_reduction_percent is not None else 'N/A'}%")
+    print(f"Latency (baseline vs compressed): {baseline_latency_ms} ms vs {compressed_latency_ms} ms")
+    print(f"Latency speedup: {latency_speedup_percent if latency_speedup_percent is not None else 'N/A'}%")
+    if warnings:
+        for warning_msg in warnings:
+            print(f"[SanityWarning] {warning_msg}")
+
+    return {
+        "baseline_latency_ms": baseline_latency_ms,
+        "compressed_latency_ms": compressed_latency_ms,
+        "latency_speedup_percent": latency_speedup_percent,
+        "baseline_benchmark_training_emissions_kg": baseline_train_co2,
+        "compressed_benchmark_training_emissions_kg": compressed_train_co2,
+        "baseline_benchmark_inference_emissions_kg": baseline_infer_co2,
+        "compressed_benchmark_inference_emissions_kg": compressed_infer_co2,
+        "baseline_benchmark_training_energy_kwh": baseline_train_energy,
+        "compressed_benchmark_training_energy_kwh": compressed_train_energy,
+        "baseline_benchmark_inference_energy_kwh": baseline_infer_energy,
+        "compressed_benchmark_inference_energy_kwh": compressed_infer_energy,
+        "baseline_benchmark_total_emissions_kg": baseline_total_co2,
+        "compressed_benchmark_total_emissions_kg": compressed_total_co2,
+        "baseline_benchmark_total_energy_kwh": baseline_total_energy,
+        "compressed_benchmark_total_energy_kwh": compressed_total_energy,
+        "emissions_reduction_percent": co2_reduction_percent,
+        "energy_reduction_percent": energy_reduction_percent,
+        "size_reduction_percent_check": size_reduction_percent,
+        "benchmark_training_epochs": benchmark_train_epochs,
+        "benchmark_training_max_batches": benchmark_train_max_batches,
+        "benchmark_inference_max_batches": benchmark_infer_max_batches,
+        "sanity_warnings": warnings,
+    }
 
 
 def _get_quantization_api():
@@ -924,6 +1193,7 @@ def apply_pruning(model, train_loader, test_loader, device,
 
     model = copy.deepcopy(model).to(device)
     input_shape = detect_input_shape(model)
+    baseline_model_for_benchmark = copy.deepcopy(model).to(device)
 
     # ✅ Full baseline accuracy
     baseline_acc = evaluate(model, test_loader, dev=device)
@@ -1029,8 +1299,31 @@ def apply_pruning(model, train_loader, test_loader, device,
         dev=device,
         project_name=f"infer_{_slugify_name(model_name)}_pruning",
         output_dir=save_dir,
-        max_batches=30,
+        max_batches=None,
     )
+
+    fair_metrics = _build_fair_comparison_metrics(
+        strategy='pruning',
+        baseline_model=baseline_model_for_benchmark,
+        compressed_model=model,
+        train_loader=train_loader,
+        test_loader=test_loader,
+        baseline_dev=device,
+        compressed_dev=device,
+        output_dir=save_dir,
+        baseline_input_shape=input_shape,
+        compressed_input_shape=input_shape,
+        baseline_size_mb=baseline_size,
+        compressed_size_mb=pruned_size,
+        benchmark_train_epochs=max(1, fine_tune_epochs),
+        benchmark_train_max_batches=100,
+        benchmark_infer_max_batches=None,
+        baseline_accuracy=baseline_acc,
+        compressed_accuracy=pruned_acc,
+    )
+
+    compressed_total_co2 = fair_metrics.get("compressed_benchmark_total_emissions_kg", 0.0)
+    compressed_total_energy = fair_metrics.get("compressed_benchmark_total_energy_kwh", 0.0)
 
     return {
         "strategy": "pruning",
@@ -1040,15 +1333,30 @@ def apply_pruning(model, train_loader, test_loader, device,
         "compressed_size_MB": pruned_size,
         "size_MB": pruned_size,
         "compression_ratio": round(baseline_size / pruned_size, 2) if pruned_size > 0 else 0,
-        "latency_ms": latency,
+        "latency_ms": fair_metrics.get("compressed_latency_ms", latency),
+        "baseline_latency_ms": fair_metrics.get("baseline_latency_ms"),
+        "latency_speedup_percent": fair_metrics.get("latency_speedup_percent"),
         "training_emissions_kg": training_emissions_kg,
         "training_co2_kg": training_emissions_kg,
         "training_energy_kwh": training_energy_kwh,
         "inference_emissions_kg": inference_emissions_kg,
         "inference_co2_kg": inference_emissions_kg,
         "inference_energy_kwh": inference_energy_kwh,
+        "baseline_total_emissions_kg": fair_metrics.get("baseline_benchmark_total_emissions_kg"),
+        "compressed_total_emissions_kg": compressed_total_co2,
+        "baseline_total_energy_kwh": fair_metrics.get("baseline_benchmark_total_energy_kwh"),
+        "compressed_total_energy_kwh": compressed_total_energy,
+        "emissions_reduction_percent": fair_metrics.get("emissions_reduction_percent"),
+        "energy_reduction_percent": fair_metrics.get("energy_reduction_percent"),
+        "sanity_warnings": fair_metrics.get("sanity_warnings", []),
+        "benchmark_training_epochs": fair_metrics.get("benchmark_training_epochs"),
+        "benchmark_training_max_batches": fair_metrics.get("benchmark_training_max_batches"),
+        "benchmark_inference_max_batches": fair_metrics.get("benchmark_inference_max_batches"),
         "training_duration_s": training_duration_s,
         "inference_duration_s": inference_duration_s,
+        "emissions_kg": compressed_total_co2,
+        "co2_kg": compressed_total_co2,
+        "energy_kwh": compressed_total_energy,
         "saved_path": save_path,
     }
 
@@ -1062,6 +1370,7 @@ def apply_quantization(model, train_loader, test_loader, device,
 
     model = copy.deepcopy(model).to(device)
     input_shape = detect_input_shape(model)
+    baseline_model_for_benchmark = copy.deepcopy(model).to(device)
 
     # ✅ Baseline (FULL dataset)
     _cb("Evaluating baseline accuracy...")
@@ -1199,8 +1508,33 @@ def apply_quantization(model, train_loader, test_loader, device,
         dev=quant_eval_dev,
         project_name=f"infer_{_slugify_name(model_name)}_quantization",
         output_dir=save_dir,
-        max_batches=30,
+        max_batches=None,
     )
+
+    benchmark_train_model = fallback_float_model if fallback_float_model is not None else model.cpu().eval()
+    fair_metrics = _build_fair_comparison_metrics(
+        strategy='quantization',
+        baseline_model=baseline_model_for_benchmark,
+        compressed_model=quantized_model,
+        compressed_training_model=benchmark_train_model,
+        train_loader=train_loader,
+        test_loader=test_loader,
+        baseline_dev=quant_eval_dev,
+        compressed_dev=quant_eval_dev,
+        output_dir=save_dir,
+        baseline_input_shape=input_shape,
+        compressed_input_shape=input_shape,
+        baseline_size_mb=baseline_size,
+        compressed_size_mb=quant_size,
+        benchmark_train_epochs=max(1, min(3, fine_tune_epochs)),
+        benchmark_train_max_batches=80,
+        benchmark_infer_max_batches=None,
+        baseline_accuracy=baseline_acc,
+        compressed_accuracy=quant_acc,
+    )
+
+    compressed_total_co2 = fair_metrics.get("compressed_benchmark_total_emissions_kg", 0.0)
+    compressed_total_energy = fair_metrics.get("compressed_benchmark_total_energy_kwh", 0.0)
 
     compression_ratio = round(baseline_size / quant_size, 2) if quant_size > 0 else 0
 
@@ -1216,7 +1550,9 @@ def apply_quantization(model, train_loader, test_loader, device,
         "size_reduction_percent": round(
             100 * (baseline_size - quant_size) / baseline_size, 2
         ) if baseline_size > 0 else 0,
-        "latency_ms": latency,
+        "latency_ms": fair_metrics.get("compressed_latency_ms", latency),
+        "baseline_latency_ms": fair_metrics.get("baseline_latency_ms"),
+        "latency_speedup_percent": fair_metrics.get("latency_speedup_percent"),
         "quantization_type": quantization_type,
         "training_emissions_kg": training_emissions_kg,
         "training_co2_kg": training_emissions_kg,
@@ -1224,8 +1560,21 @@ def apply_quantization(model, train_loader, test_loader, device,
         "inference_emissions_kg": inference_emissions_kg,
         "inference_co2_kg": inference_emissions_kg,
         "inference_energy_kwh": inference_energy_kwh,
+        "baseline_total_emissions_kg": fair_metrics.get("baseline_benchmark_total_emissions_kg"),
+        "compressed_total_emissions_kg": compressed_total_co2,
+        "baseline_total_energy_kwh": fair_metrics.get("baseline_benchmark_total_energy_kwh"),
+        "compressed_total_energy_kwh": compressed_total_energy,
+        "emissions_reduction_percent": fair_metrics.get("emissions_reduction_percent"),
+        "energy_reduction_percent": fair_metrics.get("energy_reduction_percent"),
+        "sanity_warnings": fair_metrics.get("sanity_warnings", []),
+        "benchmark_training_epochs": fair_metrics.get("benchmark_training_epochs"),
+        "benchmark_training_max_batches": fair_metrics.get("benchmark_training_max_batches"),
+        "benchmark_inference_max_batches": fair_metrics.get("benchmark_inference_max_batches"),
         "training_duration_s": training_duration_s,
         "inference_duration_s": inference_duration_s,
+        "emissions_kg": compressed_total_co2,
+        "co2_kg": compressed_total_co2,
+        "energy_kwh": compressed_total_energy,
         "saved_path": save_path,
     }
 def apply_hybrid(model, train_loader, test_loader, device,
@@ -1240,6 +1589,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
     os.makedirs(save_dir, exist_ok=True)
     model = copy.deepcopy(model).to(device)
     input_shape = detect_input_shape(model)
+    baseline_model_for_benchmark = copy.deepcopy(model).to(device)
 
     # Baseline
     _cb("Evaluating baseline accuracy...")
@@ -1460,8 +1810,32 @@ def apply_hybrid(model, train_loader, test_loader, device,
         dev=cpu_dev,
         project_name=f"infer_{_slugify_name(model_name)}_hybrid",
         output_dir=save_dir,
-        max_batches=30,
+        max_batches=None,
     )
+
+    fair_metrics = _build_fair_comparison_metrics(
+        strategy='hybrid',
+        baseline_model=baseline_model_for_benchmark,
+        compressed_model=quant_model,
+        compressed_training_model=fallback_float_model,
+        train_loader=train_loader,
+        test_loader=test_loader,
+        baseline_dev=cpu_dev,
+        compressed_dev=cpu_dev,
+        output_dir=save_dir,
+        baseline_input_shape=input_shape,
+        compressed_input_shape=input_shape,
+        baseline_size_mb=baseline_size,
+        compressed_size_mb=hybrid_size,
+        benchmark_train_epochs=max(1, min(3, fine_tune_epochs)),
+        benchmark_train_max_batches=80,
+        benchmark_infer_max_batches=None,
+        baseline_accuracy=baseline_acc,
+        compressed_accuracy=hybrid_acc,
+    )
+
+    compressed_total_co2 = fair_metrics.get("compressed_benchmark_total_emissions_kg", 0.0)
+    compressed_total_energy = fair_metrics.get("compressed_benchmark_total_energy_kwh", 0.0)
 
     if os.path.exists(baseline_path):
         os.remove(baseline_path)
@@ -1483,7 +1857,9 @@ def apply_hybrid(model, train_loader, test_loader, device,
         "compression_ratio": compression_ratio,
         "size_reduction_percent": round(
             100 * (baseline_size - hybrid_size) / baseline_size, 2) if baseline_size > 0 else 0,
-        "latency_ms": latency,
+        "latency_ms": fair_metrics.get("compressed_latency_ms", latency),
+        "baseline_latency_ms": fair_metrics.get("baseline_latency_ms"),
+        "latency_speedup_percent": fair_metrics.get("latency_speedup_percent"),
         "pruning_amount": amount,
         "sparsity_percent": round(100 * (1 - nonzero / total), 2) if total > 0 else 0,
         "total_params": total,
@@ -1496,8 +1872,21 @@ def apply_hybrid(model, train_loader, test_loader, device,
         "inference_emissions_kg": inference_emissions_kg,
         "inference_co2_kg": inference_emissions_kg,
         "inference_energy_kwh": inference_energy_kwh,
+        "baseline_total_emissions_kg": fair_metrics.get("baseline_benchmark_total_emissions_kg"),
+        "compressed_total_emissions_kg": compressed_total_co2,
+        "baseline_total_energy_kwh": fair_metrics.get("baseline_benchmark_total_energy_kwh"),
+        "compressed_total_energy_kwh": compressed_total_energy,
+        "emissions_reduction_percent": fair_metrics.get("emissions_reduction_percent"),
+        "energy_reduction_percent": fair_metrics.get("energy_reduction_percent"),
+        "sanity_warnings": fair_metrics.get("sanity_warnings", []),
+        "benchmark_training_epochs": fair_metrics.get("benchmark_training_epochs"),
+        "benchmark_training_max_batches": fair_metrics.get("benchmark_training_max_batches"),
+        "benchmark_inference_max_batches": fair_metrics.get("benchmark_inference_max_batches"),
         "training_duration_s": training_duration_s,
         "inference_duration_s": inference_duration_s,
+        "emissions_kg": compressed_total_co2,
+        "co2_kg": compressed_total_co2,
+        "energy_kwh": compressed_total_energy,
         "saved_path": save_path,
     }
 
@@ -1516,6 +1905,7 @@ def apply_kd(teacher, train_loader, test_loader, device,
     teacher = teacher.to(device)
     teacher.eval()
     input_shape = detect_input_shape(teacher)
+    baseline_model_for_benchmark = copy.deepcopy(teacher).to(device)
 
     # Baseline teacher metrics
     _cb("Evaluating teacher baseline...")
@@ -1641,8 +2031,32 @@ def apply_kd(teacher, train_loader, test_loader, device,
         dev=device,
         project_name=f"infer_{_slugify_name(model_name)}_kd",
         output_dir=save_dir,
-        max_batches=30,
+        max_batches=None,
     )
+
+    fair_metrics = _build_fair_comparison_metrics(
+        strategy='kd',
+        baseline_model=baseline_model_for_benchmark,
+        compressed_model=student,
+        compressed_training_model=student,
+        train_loader=train_loader,
+        test_loader=test_loader,
+        baseline_dev=device,
+        compressed_dev=device,
+        output_dir=save_dir,
+        baseline_input_shape=input_shape,
+        compressed_input_shape=student_input_shape,
+        baseline_size_mb=teacher_size,
+        compressed_size_mb=student_size,
+        benchmark_train_epochs=max(1, min(3, epochs)),
+        benchmark_train_max_batches=100,
+        benchmark_infer_max_batches=None,
+        baseline_accuracy=teacher_acc,
+        compressed_accuracy=student_acc,
+    )
+
+    compressed_total_co2 = fair_metrics.get("compressed_benchmark_total_emissions_kg", 0.0)
+    compressed_total_energy = fair_metrics.get("compressed_benchmark_total_energy_kwh", 0.0)
 
     if os.path.exists(teacher_path):
         os.remove(teacher_path)
@@ -1663,7 +2077,9 @@ def apply_kd(teacher, train_loader, test_loader, device,
         "compression_ratio": compression_ratio,
         "size_reduction_percent": round(
             100 * (teacher_size - student_size) / teacher_size, 2) if teacher_size > 0 else 0,
-        "latency_ms": latency,
+        "latency_ms": fair_metrics.get("compressed_latency_ms", latency),
+        "baseline_latency_ms": fair_metrics.get("baseline_latency_ms"),
+        "latency_speedup_percent": fair_metrics.get("latency_speedup_percent"),
         "teacher_params": teacher_params,
         "student_params": student_params,
         "param_reduction_percent": round(
@@ -1677,8 +2093,21 @@ def apply_kd(teacher, train_loader, test_loader, device,
         "inference_emissions_kg": inference_emissions_kg,
         "inference_co2_kg": inference_emissions_kg,
         "inference_energy_kwh": inference_energy_kwh,
+        "baseline_total_emissions_kg": fair_metrics.get("baseline_benchmark_total_emissions_kg"),
+        "compressed_total_emissions_kg": compressed_total_co2,
+        "baseline_total_energy_kwh": fair_metrics.get("baseline_benchmark_total_energy_kwh"),
+        "compressed_total_energy_kwh": compressed_total_energy,
+        "emissions_reduction_percent": fair_metrics.get("emissions_reduction_percent"),
+        "energy_reduction_percent": fair_metrics.get("energy_reduction_percent"),
+        "sanity_warnings": fair_metrics.get("sanity_warnings", []),
+        "benchmark_training_epochs": fair_metrics.get("benchmark_training_epochs"),
+        "benchmark_training_max_batches": fair_metrics.get("benchmark_training_max_batches"),
+        "benchmark_inference_max_batches": fair_metrics.get("benchmark_inference_max_batches"),
         "training_duration_s": training_duration_s,
         "inference_duration_s": inference_duration_s,
+        "emissions_kg": compressed_total_co2,
+        "co2_kg": compressed_total_co2,
+        "energy_kwh": compressed_total_energy,
         "saved_path": save_path,
     }
 
@@ -1772,8 +2201,6 @@ def compress_dynamic(model_path, strategy, dataset='CIFAR10',
                 for i, (inputs, _) in enumerate(test_loader):
                     inputs = inputs.to(device)
                     _extract_logits(model(inputs))
-                    if i >= 30:
-                        break
             inference_emissions_kg, inference_energy_kwh, _ = _finalize_emissions_tracking(
                 tracker,
                 phase_label=f"inference:fallback:{strategy}",
@@ -1794,10 +2221,10 @@ def compress_dynamic(model_path, strategy, dataset='CIFAR10',
     result["inference_co2_kg"] = inference_co2_kg if inference_co2_kg is not None else 0.0
     result["inference_energy_kwh"] = inference_energy_kwh if inference_energy_kwh is not None else 0.0
 
-    # Keep legacy top-level aliases in sync with inference metrics.
-    result["emissions_kg"] = result["inference_emissions_kg"]
-    result["co2_kg"] = result["inference_co2_kg"]
-    result["energy_kwh"] = result["inference_energy_kwh"]
+    # Keep legacy top-level aliases in sync with fair total metrics when available.
+    result["emissions_kg"] = result.get("compressed_total_emissions_kg", result["inference_emissions_kg"])
+    result["co2_kg"] = result.get("compressed_total_emissions_kg", result["inference_co2_kg"])
+    result["energy_kwh"] = result.get("compressed_total_energy_kwh", result["inference_energy_kwh"])
 
     # Add FLOPs estimate (use original model — FLOPs don't change with pruning/quantization)
     try:
@@ -2155,8 +2582,6 @@ def run_compression(model_name, method, dataset='CIFAR10',
                 for i, (inputs, _) in enumerate(test_loader):
                     inputs = inputs.to(device)
                     _extract_logits(model(inputs))
-                    if i >= 30:
-                        break
             inference_emissions_kg, inference_energy_kwh, _ = _finalize_emissions_tracking(
                 tracker,
                 phase_label=f"inference:fallback:{model_key}:{method}",
@@ -2177,10 +2602,10 @@ def run_compression(model_name, method, dataset='CIFAR10',
     result["inference_co2_kg"] = inference_co2_kg if inference_co2_kg is not None else 0.0
     result["inference_energy_kwh"] = inference_energy_kwh if inference_energy_kwh is not None else 0.0
 
-    # Keep legacy top-level aliases in sync with inference metrics.
-    result["emissions_kg"] = result["inference_emissions_kg"]
-    result["co2_kg"] = result["inference_co2_kg"]
-    result["energy_kwh"] = result["inference_energy_kwh"]
+    # Keep legacy top-level aliases in sync with fair total metrics when available.
+    result["emissions_kg"] = result.get("compressed_total_emissions_kg", result["inference_emissions_kg"])
+    result["co2_kg"] = result.get("compressed_total_emissions_kg", result["inference_co2_kg"])
+    result["energy_kwh"] = result.get("compressed_total_energy_kwh", result["inference_energy_kwh"])
 
     # Step 5: FLOPs estimate
     _cb('evaluating', 'Computing FLOPs and final metrics...')

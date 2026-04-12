@@ -59,17 +59,20 @@ export function EnergySection({
       const modelKey = normalizeModelKey(result.model_key || result.model_name);
       const baseline = baselines[modelKey];
 
-      const baselineCo2 = toFiniteNumber(baseline?.training_co2_kg);
+      const baselineCo2 = toFiniteNumber(result.baseline_total_emissions_kg ?? baseline?.training_co2_kg);
       const compressedTrainCo2 = toFiniteNumber(result.training_co2_kg ?? result.training_emissions_kg);
       const compressedInferCo2 = toFiniteNumber(
         result.inference_co2_kg ?? result.inference_emissions_kg ?? result.emissions_kg
       );
-      const compressedCo2 = compressedTrainCo2 ?? compressedInferCo2;
+      const compressedCo2 = toFiniteNumber(result.compressed_total_emissions_kg) ?? compressedTrainCo2 ?? compressedInferCo2;
 
       const reductionPercent =
         baselineCo2 != null && baselineCo2 > 0 && compressedCo2 != null
           ? ((baselineCo2 - compressedCo2) / baselineCo2) * 100
           : null;
+
+      const suspiciousReduction =
+        reductionPercent != null && reductionPercent > 80 && (result.size_reduction_percent ?? 0) < 30;
 
       return {
         key: getResultStorageKey(result),
@@ -79,6 +82,7 @@ export function EnergySection({
         compressedTrainCo2,
         compressedInferCo2,
         reductionPercent,
+        suspiciousReduction,
       };
     });
 
@@ -175,8 +179,13 @@ export function EnergySection({
 
                     <div>
                       <p className="text-[11px] text-gray-500 mt-2">
-                        Baseline uses training-result CO2; compressed uses training CO2 when available, otherwise inference CO2.
+                        Fair comparison prefers total benchmark CO2 when available; otherwise it falls back to train/infer fields.
                       </p>
+                      {row.suspiciousReduction && (
+                        <p className="text-[11px] text-amber-700 mt-1">
+                          Warning: very high CO2 reduction with small size reduction. Re-check tracking workload parity.
+                        </p>
+                      )}
                     </div>
                   </div>
                 );

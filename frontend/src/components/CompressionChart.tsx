@@ -4,9 +4,9 @@ import { Strategy } from '@/lib/api';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis,
-  PolarRadiusAxis, Radar,
+  PolarRadiusAxis, Radar, LabelList,
 } from 'recharts';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 interface ChartProps {
   strategies: Strategy[];
@@ -26,12 +26,21 @@ function toFiniteNumber(value: unknown): number | null {
   return null;
 }
 
-function strategyTrainingCo2(strategy: Strategy): number | null {
-  return toFiniteNumber(strategy.training_co2_kg ?? strategy.co2_kg);
+function strategyBaselineCo2(strategy: Strategy, fallbackBaseline: number | null): number | null {
+  return toFiniteNumber(
+    strategy.baseline_co2_kg ?? strategy.training_co2_kg ?? fallbackBaseline
+  );
 }
 
 function strategyCompressedCo2(strategy: Strategy): number | null {
-  return toFiniteNumber(strategy.training_co2_kg ?? strategy.co2_kg ?? strategy.inference_co2_kg);
+  return toFiniteNumber(
+    strategy.compressed_co2_kg ?? strategy.co2_kg ?? strategy.training_co2_kg ?? strategy.inference_co2_kg
+  );
+}
+
+function reductionPercent(baseline: number | null, compressed: number | null): number | null {
+  if (baseline == null || compressed == null || baseline <= 0) return null;
+  return ((baseline - compressed) / baseline) * 100;
 }
 
 function formatCo2Value(value: unknown): string {
@@ -57,7 +66,7 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
             <div className="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center mx-auto mb-3">
               <span className="text-gray-400 text-xl">📊</span>
             </div>
-            <p className="text-sm text-gray-500">No compression results yet</p>
+            <p className="text-sm text-gray-500">Run a model to see CO2 comparison</p>
             <p className="text-xs text-gray-400 mt-1">
               {modelName
                 ? 'Run a compression method above to see results here'
@@ -76,19 +85,43 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
   }));
 
   const baseline = strategies.find(s => s.key === 'baseline');
-  const baselineCo2 = baseline ? strategyTrainingCo2(baseline) : null;
+  const baselineCo2 = baseline
+    ? toFiniteNumber(baseline.co2_kg ?? baseline.training_co2_kg ?? baseline.baseline_co2_kg)
+    : null;
   const compressedOnly = strategies.filter(s => s.key !== 'baseline');
   const carbonRows = compressedOnly.length > 0 ? compressedOnly : strategies;
 
-  const carbonData = carbonRows.map((s) => ({
-    name: s.name.replace(/[→·]/g, '').substring(0, 24),
-    'Baseline CO₂ (kg)': baselineCo2,
-    'Compressed CO₂ (kg)': s.key === 'baseline' ? baselineCo2 : strategyCompressedCo2(s),
-  }));
+  const carbonData = carbonRows.map((s) => {
+    const baselineValue = strategyBaselineCo2(s, baselineCo2);
+    const compressedValue = s.key === 'baseline' ? baselineCo2 : strategyCompressedCo2(s);
+    const reduction = reductionPercent(baselineValue, compressedValue);
+
+    return {
+      name: s.name.replace(/[→·]/g, '').substring(0, 24),
+      'Baseline CO₂ (kg)': baselineValue,
+      'Compressed CO₂ (kg)': compressedValue,
+      'CO₂ Reduction (%)': reduction,
+      'Reduction Label': reduction != null ? `${reduction.toFixed(1)}%` : '',
+    };
+  });
 
   const hasCarbonValues = carbonData.some((row) =>
     row['Baseline CO₂ (kg)'] != null || row['Compressed CO₂ (kg)'] != null
   );
+
+  useEffect(() => {
+    const suspiciousRows = carbonData.filter((row) => {
+      const reduction = toFiniteNumber(row['CO₂ Reduction (%)']);
+      return reduction != null && reduction > 80;
+    });
+
+    if (suspiciousRows.length > 0) {
+      console.warn(
+        '[CompressionAnalysis] CO2 reduction above 80% detected. Verify size and emissions metadata.',
+        suspiciousRows
+      );
+    }
+  }, [carbonData]);
 
   const radarData = strategies
     .filter(s => s.key !== 'baseline')
@@ -100,6 +133,13 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
         'Size Reduction': Math.round(s.size_reduction),
       };
     });
+
+  const chartKey = [
+    view,
+    strategies
+      .map((s) => `${s.key}:${s.size_MB}:${s.size_reduction}:${s.baseline_co2_kg ?? ''}:${s.compressed_co2_kg ?? ''}:${s.co2_kg ?? ''}`)
+      .join('|'),
+  ].join('::');
 
   return (
     <div className="card">
@@ -132,14 +172,14 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
         {view === 'carbon' && !hasCarbonValues ? (
           <div className="h-full flex items-center justify-center text-center bg-gray-50 rounded-lg">
             <div>
-              <p className="text-sm text-gray-500">CO₂ data not available yet</p>
+              <p className="text-sm text-gray-500">Run a model to see CO2 comparison</p>
               <p className="text-xs text-gray-400 mt-1">
                 Baseline and compressed emissions will appear after valid results are loaded.
               </p>
             </div>
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer key={chartKey} width="100%" height="100%">
             {view === 'size' ? (
               <BarChart data={sizeData} margin={{ top: 5, right: 20, left: 0, bottom: 60 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
@@ -159,8 +199,10 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
                 />
                 <Tooltip formatter={(value, name) => [formatCo2Value(value), name]} />
                 <Legend />
-                <Bar dataKey="Baseline CO₂ (kg)" fill="#94a3b8" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="Compressed CO₂ (kg)" fill="#16a34a" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="Baseline CO₂ (kg)" fill="#ef4444" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="Compressed CO₂ (kg)" fill="#16a34a" radius={[4, 4, 0, 0]}>
+                  <LabelList dataKey="Reduction Label" position="top" fill="#166534" fontSize={10} />
+                </Bar>
               </BarChart>
             ) : (
               <RadarChart data={radarData} cx="50%" cy="50%" outerRadius="70%">

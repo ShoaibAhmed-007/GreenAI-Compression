@@ -147,7 +147,9 @@ export default function Home() {
 
   if (!data) return null;
 
-  // --- Chart data: always include baseline for selected model ---
+  // --- Chart data ---
+  // If a model is selected, show baseline + that model's compression runs.
+  // Otherwise, show all saved compression runs so the chart still renders after refresh.
   let chartStrategies: Strategy[] = [];
   if (selectedModel && baselines?.models[selectedModel]) {
     const baselineModel = baselines.models[selectedModel];
@@ -167,6 +169,8 @@ export default function Home() {
       size_reduction: 0,
       // latency_ms: baselineModel.latency_ms || 0,
       params: baselineModel.total_params || 0,
+      baseline_co2_kg: baselineTrainingCo2,
+      compressed_co2_kg: baselineTrainingCo2,
       co2_kg: baselineTrainingCo2,
       training_co2_kg: baselineTrainingCo2,
       inference_co2_kg: undefined,
@@ -183,6 +187,8 @@ export default function Home() {
     } else {
       chartStrategies = resultStrategies;
     }
+  } else if (savedResults.length > 0) {
+    chartStrategies = savedResults.map(dynamicResultToStrategy);
   } else {
     chartStrategies = [];
   }
@@ -237,7 +243,7 @@ export default function Home() {
               : 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
           }`}
         >
-          Reset Current Session Results
+          Clear History
         </button>
       </div>
 

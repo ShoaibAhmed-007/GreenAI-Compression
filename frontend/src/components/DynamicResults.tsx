@@ -55,6 +55,20 @@ export function DynamicResults({ results, onClear }: DynamicResultsProps) {
           const methodLabel = STRATEGY_LABELS[result.strategy] || result.strategy;
           const trainingCo2 = result.training_co2_kg ?? result.training_emissions_kg;
           const inferenceCo2 = result.inference_co2_kg ?? result.inference_emissions_kg ?? result.emissions_kg;
+          const baselineTotalCo2 = result.baseline_total_emissions_kg;
+          const compressedTotalCo2 = result.compressed_total_emissions_kg ?? result.co2_kg ?? result.emissions_kg;
+          const emissionsReduction =
+            result.emissions_reduction_percent ??
+            (baselineTotalCo2 && baselineTotalCo2 > 0 && compressedTotalCo2 != null
+              ? ((baselineTotalCo2 - compressedTotalCo2) / baselineTotalCo2) * 100
+              : null);
+          const baselineLatency = result.baseline_latency_ms;
+          const compressedLatency = result.compressed_latency_ms ?? result.latency_ms;
+          const latencySpeedup =
+            result.latency_speedup_percent ??
+            (baselineLatency && baselineLatency > 0 && compressedLatency != null
+              ? ((baselineLatency - compressedLatency) / baselineLatency) * 100
+              : null);
 
           return (
             <div key={idx} className="border border-gray-200 rounded-lg overflow-hidden">
@@ -107,7 +121,15 @@ export function DynamicResults({ results, onClear }: DynamicResultsProps) {
                       value={`${result.size_MB} MB`}
                       sub={`from ${result.baseline_size_MB} MB`}
                     />
-                    {/* <MiniMetric label="Latency" value={`${result.latency_ms} ms`} /> */}
+                    <MiniMetric
+                      label="Latency"
+                      value={compressedLatency != null ? `${compressedLatency.toFixed(2)} ms` : 'Not Available'}
+                      sub={
+                        baselineLatency != null
+                          ? `baseline ${baselineLatency.toFixed(2)} ms`
+                          : undefined
+                      }
+                    />
                   </div>
 
                   {/* Size comparison bar */}
@@ -153,6 +175,18 @@ export function DynamicResults({ results, onClear }: DynamicResultsProps) {
                       {inferenceCo2 != null && (
                         <DetailRow label="Infer CO₂" value={formatCo2(inferenceCo2)} />
                       )}
+                      {baselineTotalCo2 != null && (
+                        <DetailRow label="Baseline Total CO₂" value={formatCo2(baselineTotalCo2)} />
+                      )}
+                      {compressedTotalCo2 != null && (
+                        <DetailRow label="Compressed Total CO₂" value={formatCo2(compressedTotalCo2)} />
+                      )}
+                      {emissionsReduction != null && (
+                        <DetailRow label="CO₂ Reduction" value={`${emissionsReduction.toFixed(2)}%`} />
+                      )}
+                      {latencySpeedup != null && (
+                        <DetailRow label="Latency Speedup" value={`${latencySpeedup.toFixed(2)}%`} />
+                      )}
                       {result.training_energy_kwh != null && (
                         <DetailRow label="Train Energy" value={`${result.training_energy_kwh.toFixed(8)} kWh`} />
                       )}
@@ -177,6 +211,16 @@ export function DynamicResults({ results, onClear }: DynamicResultsProps) {
                       {result.pipeline && (
                         <div className="col-span-2">
                           <DetailRow label="Pipeline" value={result.pipeline} />
+                        </div>
+                      )}
+                      {Array.isArray(result.sanity_warnings) && result.sanity_warnings.length > 0 && (
+                        <div className="col-span-2 mt-1 rounded border border-amber-200 bg-amber-50 p-2">
+                          <p className="text-[11px] font-semibold text-amber-800">Sanity warnings</p>
+                          {result.sanity_warnings.map((warning, warningIdx) => (
+                            <p key={`warn-${warningIdx}`} className="text-[11px] text-amber-700 mt-0.5">
+                              • {warning}
+                            </p>
+                          ))}
                         </div>
                       )}
                     </div>

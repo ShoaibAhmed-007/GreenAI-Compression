@@ -28,6 +28,7 @@ from torch.utils.data import DataLoader
 import torchvision
 import torchvision.transforms as transforms
 from torchvision import models
+from torchvision.models import DenseNet121_Weights, MobileNet_V2_Weights, ResNet18_Weights
 
 
 # ---------------------- Utilities ----------------------
@@ -89,13 +90,16 @@ def mixup_data(x, y, alpha=1.0, device='cpu'):
 
 
 # ---------------------- Model adapters ----------------------
-def get_model(name='resnet18', pretrained=False, num_classes=10, dropout_p=0.35):
+def get_model(name='resnet18', pretrained=False, num_classes=10,
+              dropout_p=0.35, adapt_stem_for_cifar=False):
     name = name.lower()
     if name == 'resnet18':
-        model = models.resnet18(pretrained=pretrained)
-        # Modify first conv for CIFAR: 3x3, stride 1, padding 1
-        model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        model.maxpool = nn.Identity()  # remove 32->16 pooling
+        weights = ResNet18_Weights.DEFAULT if pretrained else None
+        model = models.resnet18(weights=weights)
+        # For native 32x32 training, a CIFAR-friendly stem helps preserve detail.
+        if adapt_stem_for_cifar:
+            model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            model.maxpool = nn.Identity()
         model.fc = nn.Sequential(
             nn.Dropout(p=dropout_p),
             nn.Linear(model.fc.in_features, num_classes),
@@ -103,12 +107,13 @@ def get_model(name='resnet18', pretrained=False, num_classes=10, dropout_p=0.35)
         return model
 
     if name == 'densenet121' or name == 'densenet':
-        model = models.densenet121(pretrained=pretrained)
-        # Replace initial conv with 3x3 and remove pool
-        model.features.conv0 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        # pool0 exists in torchvision densenet implementation
-        if hasattr(model.features, 'pool0'):
-            model.features.pool0 = nn.Identity()
+        weights = DenseNet121_Weights.DEFAULT if pretrained else None
+        model = models.densenet121(weights=weights)
+        if adapt_stem_for_cifar:
+            # Replace initial conv with 3x3 and remove pool for 32x32 inputs.
+            model.features.conv0 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            if hasattr(model.features, 'pool0'):
+                model.features.pool0 = nn.Identity()
         model.classifier = nn.Sequential(
             nn.Dropout(p=dropout_p),
             nn.Linear(model.classifier.in_features, num_classes),
@@ -116,16 +121,17 @@ def get_model(name='resnet18', pretrained=False, num_classes=10, dropout_p=0.35)
         return model
 
     if name == 'mobilenetv2' or name == 'mobilenet_v2':
-        model = models.mobilenet_v2(pretrained=pretrained)
-        # Change first conv stride from 2 to 1 to preserve 32x32
-        # features[0] is ConvBNReLU, and first conv inside it is at index 0
-        try:
-            model.features[0][0] = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False)
-        except Exception:
+        weights = MobileNet_V2_Weights.DEFAULT if pretrained else None
+        model = models.mobilenet_v2(weights=weights)
+        if adapt_stem_for_cifar:
+            # Change first conv stride from 2 to 1 to preserve 32x32.
             try:
-                model.features[0] = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False)
+                model.features[0][0] = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False)
             except Exception:
-                pass
+                try:
+                    model.features[0] = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False)
+                except Exception:
+                    pass
         # Replace classifier
         if isinstance(model.classifier, nn.Sequential):
             if len(model.classifier) > 0 and isinstance(model.classifier[0], nn.Dropout):
@@ -218,11 +224,14 @@ def validate(model, loader, criterion, device):
 def parse_args():
     parser = argparse.ArgumentParser(description='CIFAR-10 training (Green AI friendly)')
     parser.add_argument('--model', default='resnet18', choices=['resnet18', 'densenet121', 'mobilenetv2'], help='model name')
-    parser.add_argument('--epochs', default=200, type=int)
+    parser.add_argument('--epochs', default=120, type=int)
     parser.add_argument('--batch-size', default=128, type=int)
-    parser.add_argument('--lr', default=0.1, type=float)
+    parser.add_argument('--lr', default=None, type=float,
+                        help='learning rate (default: 0.01 pretrained, 0.1 scratch)')
     parser.add_argument('--momentum', default=0.9, type=float)
     parser.add_argument('--weight-decay', default=5e-4, type=float)
+    parser.add_argument('--input-size', default=224, type=int,
+                        help='input size (224 for pretrained ImageNet backbones, 32 for scratch CIFAR stem)')
     parser.add_argument('--dropout', default=0.35, type=float, help='classifier dropout probability')
     parser.add_argument('--color-jitter', default=0.15, type=float, help='color jitter strength (0 to disable)')
     parser.add_argument('--smoothing', default=0.1, type=float)
@@ -233,7 +242,7 @@ def parse_args():
     parser.add_argument('--save-dir', default='./checkpoints', type=str)
     parser.add_argument('--use-amp', action='store_true', help='use mixed precision')
     parser.add_argument('--no-pretrained', dest='pretrained', action='store_false')
-    parser.set_defaults(pretrained=False)
+    parser.set_defaults(pretrained=True)
     return parser.parse_args()
 
 
@@ -243,6 +252,23 @@ def main():
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+    if args.input_size < 32:
+        args.input_size = 32
+    if args.pretrained and args.input_size < 96:
+        print('Using pretrained backbone: overriding input size to 224 for stable transfer learning.')
+        args.input_size = 224
+
+    # For tiny native inputs, use a CIFAR-friendly stem. For resized 224 inputs, keep ImageNet stem.
+    adapt_stem_for_cifar = args.input_size <= 64
+
+    if args.lr is None:
+        args.lr = 0.01 if args.pretrained else 0.1
+
+    print(
+        f"Config | model={args.model} pretrained={args.pretrained} input={args.input_size} "
+        f"epochs={args.epochs} batch={args.batch_size} lr={args.lr}"
+    )
+
     # Data transforms
     mean = (0.4914, 0.4822, 0.4465)
     std = (0.2470, 0.2435, 0.2616)
@@ -250,8 +276,11 @@ def main():
     train_transforms = [
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
-        transforms.Resize(32),
     ]
+    if args.input_size > 32:
+        train_transforms.append(
+            transforms.Resize(args.input_size, interpolation=transforms.InterpolationMode.BICUBIC)
+        )
     if args.color_jitter > 0:
         cj = float(args.color_jitter)
         train_transforms.append(
@@ -263,7 +292,7 @@ def main():
     train_transform = transforms.Compose(train_transforms)
 
     test_transform = transforms.Compose([
-        transforms.Resize(32),
+        transforms.Resize(args.input_size, interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
     ])
@@ -281,6 +310,7 @@ def main():
         pretrained=args.pretrained,
         num_classes=10,
         dropout_p=max(0.0, min(float(args.dropout), 0.8)),
+        adapt_stem_for_cifar=adapt_stem_for_cifar,
     )
     model = model.to(device)
 
@@ -288,8 +318,18 @@ def main():
     criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
 
     # Optimizer and scheduler
-    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=args.lr,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay,
+        nesterov=True,
+    )
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+        eta_min=max(args.lr * 0.01, 1e-6),
+    )
 
     scaler = torch.cuda.amp.GradScaler() if (args.use_amp and device == 'cuda') else None
 
