@@ -53,6 +53,32 @@ function formatCo2Value(value: unknown): string {
 export function CompressionChart({ strategies, modelName }: ChartProps) {
   const [view, setView] = useState<ChartView>('size');
 
+  useEffect(() => {
+    if (!strategies.length) return;
+
+    const baseline = strategies.find(s => s.key === 'baseline');
+    const baselineCo2 = baseline
+      ? toFiniteNumber(baseline.co2_kg ?? baseline.training_co2_kg ?? baseline.baseline_co2_kg)
+      : null;
+    
+    const compressedOnly = strategies.filter(s => s.key !== 'baseline');
+    const carbonRows = compressedOnly.length > 0 ? compressedOnly : strategies;
+
+    const suspiciousRows = carbonRows.filter((s) => {
+      const baselineValue = strategyBaselineCo2(s, baselineCo2);
+      const compressedValue = s.key === 'baseline' ? baselineCo2 : strategyCompressedCo2(s);
+      const reduction = reductionPercent(baselineValue, compressedValue);
+      return reduction != null && reduction > 80;
+    });
+
+    if (suspiciousRows.length > 0) {
+      console.warn(
+        '[CompressionAnalysis] CO2 reduction above 80% detected. Verify size and emissions metadata.',
+        suspiciousRows.map(s => s.name)
+      );
+    }
+  }, [strategies]);
+
   const title = modelName
     ? `Compression Analysis — ${modelName}`
     : 'Compression Analysis';
@@ -88,19 +114,7 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
     row['Baseline CO₂ (kg)'] != null || row['Compressed CO₂ (kg)'] != null
   );
 
-  useEffect(() => {
-    const suspiciousRows = carbonData.filter((row) => {
-      const reduction = toFiniteNumber(row['CO₂ Reduction (%)']);
-      return reduction != null && reduction > 80;
-    });
 
-    if (suspiciousRows.length > 0) {
-      console.warn(
-        '[CompressionAnalysis] CO2 reduction above 80% detected. Verify size and emissions metadata.',
-        suspiciousRows
-      );
-    }
-  }, [carbonData]);
 
   if (!strategies.length) {
     return (
@@ -156,11 +170,10 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
             <button
               key={tab.key}
               onClick={() => setView(tab.key)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                view === tab.key
-                  ? 'bg-green-100 text-green-700'
-                  : 'text-gray-500 hover:bg-gray-100'
-              }`}
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${view === tab.key
+                ? 'bg-green-100 text-green-700'
+                : 'text-gray-500 hover:bg-gray-100'
+                }`}
             >
               {tab.label}
             </button>
