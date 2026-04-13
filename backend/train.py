@@ -327,9 +327,19 @@ def train_model(model_name: str, epochs: int = 50, batch_size: int = 128,
     if tracker is not None:
         try:
             emissions = tracker.stop()
-            if emissions:
-                co2_kg = round(float(emissions), 8)
-                energy_kwh = round(co2_kg / 1000, 8)  # approximate
+            if emissions is not None:
+                co2_kg = round(max(float(emissions), 0.0), 8)
+
+            final_data = getattr(tracker, "final_emissions_data", None)
+            if final_data is not None and hasattr(final_data, "energy_consumed"):
+                try:
+                    energy_kwh = round(max(float(final_data.energy_consumed), 0.0), 8)
+                except (TypeError, ValueError):
+                    energy_kwh = 0.0
+
+            # Fallback approximation if tracker energy is unavailable.
+            if energy_kwh <= 0 and co2_kg > 0:
+                energy_kwh = round(co2_kg / 1000, 8)
         except Exception:
             pass
 
@@ -352,6 +362,8 @@ def train_model(model_name: str, epochs: int = 50, batch_size: int = 128,
         'training_time_seconds': round(total_time, 1),
         'energy_kwh': energy_kwh,
         'co2_kg': co2_kg,
+        'training_energy_kwh': energy_kwh,
+        'training_co2_kg': co2_kg,
         'device': str(device),
         'amp': use_amp_actual,
     }
@@ -459,16 +471,27 @@ def main():
             print(f"\n  ❌ FAILED: {model_name} — {e}")
             all_results[model_name] = {'model_name': model_name, 'error': str(e)}
 
-    # Save combined results
+    # Save combined results (merge with existing so partial reruns do not wipe prior models).
     combined_path = os.path.join(args.results_dir, 'training_results_all.json')
     os.makedirs(args.results_dir, exist_ok=True)
+    existing_results = {}
+    if os.path.exists(combined_path):
+        try:
+            with open(combined_path, 'r') as f:
+                payload = json.load(f)
+            if isinstance(payload, dict):
+                existing_results = payload
+        except Exception:
+            existing_results = {}
+
+    existing_results.update(all_results)
     with open(combined_path, 'w') as f:
-        json.dump(all_results, f, indent=2)
+        json.dump(existing_results, f, indent=2)
 
     print(f"\n{'='*60}")
     print(f"  TRAINING COMPLETE")
     print(f"{'='*60}")
-    for name, r in all_results.items():
+    for name, r in existing_results.items():
         if 'error' in r:
             print(f"  ❌ {name}: {r['error']}")
         else:

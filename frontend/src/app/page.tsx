@@ -30,6 +30,25 @@ export default function Home() {
     return key.replace(/\s+/g, '_');
   }, []);
 
+  const mapResultToStrategy = useCallback((result: DynamicResult): Strategy => {
+    const strategy = dynamicResultToStrategy(result);
+    const modelKey = normalizeModelKey(result);
+    const baselineModel = baselines?.models?.[modelKey];
+    const immutableBaselineCo2 =
+      baselineModel && typeof baselineModel.training_co2_kg === 'number'
+        ? baselineModel.training_co2_kg
+        : undefined;
+
+    if (immutableBaselineCo2 == null) {
+      return strategy;
+    }
+
+    return {
+      ...strategy,
+      baseline_co2_kg: immutableBaselineCo2,
+    };
+  }, [baselines, normalizeModelKey]);
+
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
@@ -183,7 +202,7 @@ export default function Home() {
       sparsity_percent: undefined,
     };
     const selectedModelResults = getResultsForModel(selectedModel);
-    const resultStrategies = selectedModelResults.map(dynamicResultToStrategy);
+    const resultStrategies = selectedModelResults.map(mapResultToStrategy);
     // Only add baseline if not already present
     if (!resultStrategies.some(s => s.key === 'baseline')) {
       chartStrategies = [baselineStrategy, ...resultStrategies];
@@ -191,14 +210,14 @@ export default function Home() {
       chartStrategies = resultStrategies;
     }
   } else if (savedResults.length > 0) {
-    chartStrategies = savedResults.map(dynamicResultToStrategy);
+    chartStrategies = savedResults.map(mapResultToStrategy);
   } else {
     chartStrategies = [];
   }
 
   // --- Table data: ALL accumulated results across all models ---
   const allStrategies = savedResults.map((result) => ({
-    ...dynamicResultToStrategy(result),
+    ...mapResultToStrategy(result),
     key: getResultStorageKey(result),
   }));
 
@@ -272,13 +291,16 @@ export default function Home() {
         />
       )}
 
-      {/* Compression Dialog */}
-      <CompressionDialog
-        open={Boolean(isCompressionDialogOpen && selectedModel && baselines?.models[selectedModel])}
-        modelKey={selectedModel}
-        model={selectedModel && baselines?.models[selectedModel] ? baselines.models[selectedModel] : null}
-        onClose={() => setCompressionDialogOpen(false)}
-      />
+      {/* Inline Expanded Model Details */}
+      {selectedModel && baselines?.models[selectedModel] && (
+        <CompressionDialog
+          open={isCompressionDialogOpen}
+          modelKey={selectedModel}
+          model={baselines.models[selectedModel]}
+          onClose={() => setCompressionDialogOpen(false)}
+          onNewResult={handleNewResult}
+        />
+      )}
 
       {/* Compression Analysis (selected model only) + Strategy Comparison (all results) */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

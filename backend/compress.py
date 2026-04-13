@@ -3230,3 +3230,307 @@ if __name__ == "__main__":
     print("\nAll results saved to ../results/")
     print("All models saved to ../models/")
     print("\n✅ All compression strategies completed!")
+    # ============================================================
+# Deployment Export Pipeline
+# PyTorch → ONNX → TensorFlow SavedModel → TFLite (.tflite)
+# ============================================================
+
+def export_to_onnx(model, save_path, input_shape=(1, 3, 32, 32), opset=11):
+    """Export a PyTorch model to ONNX format.
+
+    Args:
+        model:        A trained/compressed PyTorch nn.Module.
+        save_path:    Destination path for the .onnx file.
+        input_shape:  Tuple describing a single sample shape (N, C, H, W).
+                      Defaults to CIFAR-10 format (1, 3, 32, 32).
+        opset:        ONNX opset version. 11 is the recommended stable version.
+
+    Returns:
+        save_path (str) on success.
+
+    Raises:
+        RuntimeError: If the ONNX export fails.
+
+    Compatibility:
+        * CompactStudent (MobileNet-style)
+        * ResNet18 / ResNet variants
+        * CIFAR-10 input shape (32x32)
+    """
+    print(f"\n[ONNX Export] Exporting model to: {save_path}")
+
+    # --- safety: remove any residual pruning reparameterization ---
+    removed = _remove_pruning_from_model(model)
+    if removed:
+        print(f"[ONNX Export] Removed pruning masks from {removed} layer(s).")
+
+    # Move model to CPU and switch to eval mode
+    model = model.cpu()
+    model.eval()
+
+    # Convert any sparse parameters to dense (sparse tensors cannot be traced)
+    with torch.no_grad():
+        for param in model.parameters():
+            if param.is_sparse:
+                param.data = param.data.to_dense()
+
+    dummy_input = torch.randn(*input_shape)
+
+    # Dynamic batch-size axis so the exported graph is not locked to N=1
+    dynamic_axes = {
+        "input":  {0: "batch_size"},
+        "output": {0: "batch_size"},
+    }
+
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+
+    try:
+        torch.onnx.export(
+            model,
+            dummy_input,
+            save_path,
+            export_params=True,
+            opset_version=opset,
+            do_constant_folding=True,
+            input_names=["input"],
+            output_names=["output"],
+            dynamic_axes=dynamic_axes,
+        )
+        size_mb = get_size_mb(save_path)
+        print(f"[ONNX Export] ✅ Saved  →  {save_path}  ({size_mb} MB)")
+        return save_path
+    except Exception as e:
+        raise RuntimeError(
+            f"[ONNX Export] ❌ Export failed.\n"
+            f"  Model      : {type(model)._name_}\n"
+            f"  Input shape: {input_shape}\n"
+            f"  Opset      : {opset}\n"
+            f"  Error      : {e}"
+        ) from e
+
+
+def onnx_to_tensorflow(onnx_path, output_dir):
+    """Convert an ONNX model to a TensorFlow SavedModel.
+
+    Requires (install if missing):
+        pip install onnx onnx-tf tensorflow
+
+    Args:
+        onnx_path:   Path to the .onnx file produced by export_to_onnx().
+        output_dir:  Directory where the TF SavedModel will be written.
+
+    Returns:
+        output_dir (str) on success.
+    """
+    print(f"\n[TF Conversion] Converting ONNX → TensorFlow SavedModel")
+    print(f"  ONNX source : {onnx_path}")
+    print(f"  Output dir  : {output_dir}")
+
+    try:
+        import onnx as onnx_lib
+    except ImportError as e:
+        raise ImportError(
+            "[TF Conversion] ❌ 'onnx' package not found. "
+            "Install with: pip install onnx"
+        ) from e
+
+    try:
+        import onnx_tf.backend as onnx_tf_backend
+    except ImportError as e:
+        raise ImportError(
+            "[TF Conversion] ❌ 'onnx-tf' package not found. "
+            "Install with: pip install onnx-tf"
+        ) from e
+
+    try:
+        onnx_model = onnx_lib.load(onnx_path)
+        onnx_lib.checker.check_model(onnx_model)
+
+        os.makedirs(output_dir, exist_ok=True)
+        tf_rep = onnx_tf_backend.prepare(onnx_model)
+        tf_rep.export_graph(output_dir)
+
+        print(f"[TF Conversion] ✅ SavedModel written to: {output_dir}")
+        return output_dir
+    except Exception as e:
+        print(
+            f"[TF Conversion] ❌ Conversion failed.\n"
+            f"  ONNX file: {onnx_path}\n"
+            f"  Reason   : {e}\n"
+            f"  Tip      : Verify onnx-tf and tensorflow versions are compatible."
+        )
+        raise
+
+
+def tensorflow_to_tflite(saved_model_dir, tflite_path, quantize=True):
+    """Convert a TensorFlow SavedModel to TFLite (.tflite).
+
+    Args:
+        saved_model_dir:  Path to the SavedModel directory produced by
+                          onnx_to_tensorflow().
+        tflite_path:      Destination path for the .tflite file.
+        quantize:         If True, applies tf.lite.Optimize.DEFAULT (dynamic-
+                          range / weight-only INT8 quantization).  No
+                          representative dataset is required for this mode.
+
+    Returns:
+        tflite_path (str) on success.
+    """
+    print(f"\n[TFLite Conversion] Converting TF SavedModel → TFLite")
+    print(f"  SavedModel dir : {saved_model_dir}")
+    print(f"  TFLite output  : {tflite_path}")
+    print(f"  Quantize       : {quantize}")
+
+    try:
+        import tensorflow as tf
+    except ImportError as e:
+        raise ImportError(
+            "[TFLite Conversion] ❌ 'tensorflow' package not found. "
+            "Install with: pip install tensorflow"
+        ) from e
+
+    try:
+        converter = tf.lite.TFLiteConverter.from_saved_model(saved_model_dir)
+
+        if quantize:
+            # DEFAULT = dynamic-range quantization (INT8 weights, float activations).
+            # For full INT8 (activations + weights), supply a representative dataset.
+            converter.optimizations = [tf.lite.Optimize.DEFAULT]
+
+        tflite_model = converter.convert()
+
+        os.makedirs(os.path.dirname(os.path.abspath(tflite_path)), exist_ok=True)
+        with open(tflite_path, "wb") as f:
+            f.write(tflite_model)
+
+        size_mb = get_size_mb(tflite_path)
+        print(f"[TFLite Conversion] ✅ Saved  →  {tflite_path}  ({size_mb} MB)")
+        return tflite_path
+    except Exception as e:
+        print(
+            f"[TFLite Conversion] ❌ Conversion failed.\n"
+            f"  SavedModel dir : {saved_model_dir}\n"
+            f"  TFLite path    : {tflite_path}\n"
+            f"  Quantize flag  : {quantize}\n"
+            f"  Debug info     : {type(e)._name_}: {e}\n"
+            f"  Tip            : Verify the SavedModel was exported correctly "
+            f"and tensorflow >= 2.x is installed."
+        )
+        raise
+
+
+def export_full_pipeline(model, export_dir, model_name="model",
+                         input_shape=(1, 3, 32, 32), opset=11,
+                         quantize_tflite=True):
+    """Run the complete PyTorch → ONNX → TensorFlow → TFLite export pipeline.
+
+    Output structure::
+
+        export_dir/
+            <model_name>.onnx
+            tf_model/          ← TensorFlow SavedModel
+            <model_name>.tflite
+
+    Args:
+        model:             Trained/compressed PyTorch nn.Module.
+                           Works with CompactStudent, ResNet18, and ResNet variants.
+        export_dir:        Root directory for all export artifacts.
+        model_name:        Base name used for output files (default: "model").
+        input_shape:       ONNX dummy input shape.  Defaults to CIFAR-10
+                           format (1, 3, 32, 32).
+        opset:             ONNX opset version (default: 11).
+        quantize_tflite:   Enable DEFAULT quantization in TFLite conversion
+                           (default: True).
+
+    Returns:
+        dict with keys:
+            `onnx_path`    – path to .onnx file, or None on failure.
+            `tf_dir`       – path to tf_model/ directory, or None on failure.
+            `tflite_path`  – path to .tflite file, or None on failure.
+
+    Notes:
+        * Pruning masks are removed automatically before export.
+        * Model is moved to CPU and set to eval mode before export.
+        * Sparse parameter tensors are converted to dense for ONNX tracing.
+        * Each step is independently guarded; a failure stops subsequent steps
+          and reports a meaningful log message rather than crashing silently.
+    """
+    safe_name = _slugify_name(model_name)
+    os.makedirs(export_dir, exist_ok=True)
+
+    onnx_path   = os.path.join(export_dir, f"{safe_name}.onnx")
+    tf_dir      = os.path.join(export_dir, "tf_model")
+    tflite_path = os.path.join(export_dir, f"{safe_name}.tflite")
+
+    print("\n" + "=" * 65)
+    print(f"DEPLOYMENT EXPORT PIPELINE")
+    print(f"  Export dir : {export_dir}")
+    print(f"  Model name : {safe_name}")
+    print("=" * 65)
+
+    # ── Pre-export safety ───────────────────────────────────────────────────
+    removed = _remove_pruning_from_model(model)
+    if removed:
+        print(f"[Pipeline] Removed pruning masks from {removed} layer(s).")
+
+    model = model.cpu()
+    model.eval()
+
+    # Dense-ify any sparse parameter tensors so ONNX tracing succeeds
+    with torch.no_grad():
+        for param in model.parameters():
+            if param.is_sparse:
+                param.data = param.data.to_dense()
+
+    # ── Step 1: PyTorch → ONNX ─────────────────────────────────────────────
+    print("\n[Pipeline] Step 1/3 — PyTorch → ONNX")
+    onnx_ok = False
+    try:
+        export_to_onnx(model, onnx_path, input_shape=input_shape, opset=opset)
+        onnx_ok = True
+    except RuntimeError as e:
+        print(f"[Pipeline] ⚠️  ONNX export failed: {e}")
+        print("[Pipeline] Aborting TensorFlow and TFLite steps.")
+        _print_export_summary(onnx_ok=False, tf_ok=False, tflite_ok=False,
+                              onnx_path=onnx_path, tf_dir=tf_dir,
+                              tflite_path=tflite_path)
+        return {"onnx_path": None, "tf_dir": None, "tflite_path": None}
+
+    # ── Step 2: ONNX → TensorFlow SavedModel ───────────────────────────────
+    print("\n[Pipeline] Step 2/3 — ONNX → TensorFlow SavedModel")
+    tf_ok = False
+    try:
+        onnx_to_tensorflow(onnx_path, tf_dir)
+        tf_ok = True
+    except Exception as e:
+        print(f"[Pipeline] ⚠️  TensorFlow conversion failed: {e}")
+        print("[Pipeline] Skipping TFLite step.")
+
+    # ── Step 3: TensorFlow → TFLite ────────────────────────────────────────
+    tflite_ok = False
+    if tf_ok:
+        print("\n[Pipeline] Step 3/3 — TensorFlow → TFLite")
+        try:
+            tensorflow_to_tflite(tf_dir, tflite_path, quantize=quantize_tflite)
+            tflite_ok = True
+        except Exception as e:
+            print(f"[Pipeline] ⚠️  TFLite conversion failed: {e}")
+
+    # ── Summary ─────────────────────────────────────────────────────────────
+    _print_export_summary(onnx_ok, tf_ok, tflite_ok, onnx_path, tf_dir, tflite_path)
+
+    return {
+        "onnx_path":   onnx_path   if onnx_ok   else None,
+        "tf_dir":      tf_dir      if tf_ok      else None,
+        "tflite_path": tflite_path if tflite_ok  else None,
+    }
+
+
+def _print_export_summary(onnx_ok, tf_ok, tflite_ok,
+                          onnx_path, tf_dir, tflite_path):
+    """Print a formatted export completion summary."""
+    print("\n" + "=" * 65)
+    print("[EXPORT COMPLETE]")
+    print(f"  ONNX   : {onnx_path   if onnx_ok   else '❌ FAILED'}")
+    print(f"  TF     : {tf_dir      if tf_ok      else '❌ FAILED'}")
+    print(f"  TFLite : {tflite_path if tflite_ok  else '❌ FAILED'}")
+    print("=" * 65)

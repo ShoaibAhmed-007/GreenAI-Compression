@@ -54,6 +54,21 @@ def prepare_single_model(model_key, dataset='CIFAR10', device=None, save_weights
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    tracker = None
+    try:
+        from codecarbon import OfflineEmissionsTracker
+        tracker = OfflineEmissionsTracker(
+            project_name=f"prepare_{model_key}",
+            output_dir=os.path.join(os.path.dirname(__file__), '..', 'results'),
+            country_iso_code="PAK",
+            region="Punjab",
+            log_level="error",
+        )
+        tracker.start()
+        print("  [0/5] CodeCarbon energy tracking: ACTIVE", flush=True)
+    except Exception as tracking_err:
+        print(f"  [0/5] CodeCarbon energy tracking unavailable: {tracking_err}", flush=True)
+
     cfg = PRELOADED_MODELS[model_key]
     input_size = cfg['input_size']
     num_classes = 10 if dataset.upper() == 'CIFAR10' else 100
@@ -128,6 +143,26 @@ def prepare_single_model(model_key, dataset='CIFAR10', device=None, save_weights
     else:
         size_mb = round(sum(p.nelement() * p.element_size() for p in model.parameters()) / 1e6, 2)
 
+    training_co2_kg = 0.0
+    training_energy_kwh = 0.0
+    if tracker is not None:
+        try:
+            emissions = tracker.stop()
+            if emissions is not None:
+                training_co2_kg = round(max(float(emissions), 0.0), 8)
+
+            final_data = getattr(tracker, "final_emissions_data", None)
+            if final_data is not None and hasattr(final_data, "energy_consumed"):
+                try:
+                    training_energy_kwh = round(max(float(final_data.energy_consumed), 0.0), 8)
+                except (TypeError, ValueError):
+                    training_energy_kwh = 0.0
+
+            if training_energy_kwh <= 0 and training_co2_kg > 0:
+                training_energy_kwh = round(training_co2_kg / 1000, 8)
+        except Exception as tracking_stop_err:
+            print(f"  [5/5] Failed to finalize CodeCarbon tracker: {tracking_stop_err}", flush=True)
+
     result = {
         'model_key': model_key,
         'model_name': cfg['name'],
@@ -138,6 +173,10 @@ def prepare_single_model(model_key, dataset='CIFAR10', device=None, save_weights
         'accuracy': accuracy,
         'size_MB': size_mb,
         'latency_ms': latency,
+        'training_co2_kg': training_co2_kg,
+        'training_energy_kwh': training_energy_kwh,
+        'co2_kg': training_co2_kg,
+        'energy_kwh': training_energy_kwh,
         'status': 'ready',
     }
 

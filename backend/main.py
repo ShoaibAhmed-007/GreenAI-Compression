@@ -10,8 +10,9 @@ REST API endpoints for the GreenAI compression dashboard:
   GET  /api/energy            — Energy & emissions report
   GET  /api/evaluation        — Full evaluation report
   GET  /api/models            — List available models with sizes
-  POST /api/compress          — Trigger compression on the baseline model
+    POST /api/compress/preloaded — Compress a prepared baseline model
   POST /api/compress/dynamic  — Upload any model + apply dynamic compression
+    POST /api/compress          — Deprecated (use /api/compress/preloaded or /api/compress/dynamic)
   GET  /api/compare           — Side-by-side comparison of all strategies
 
 Run: uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -27,6 +28,7 @@ import glob
 import io
 import os
 import json
+import copy
 import math
 import logging
 import re
@@ -221,7 +223,7 @@ def _find_compression_history_entry(model_key: str, strategy: str) -> Optional[d
                 entry.get("strategy") or entry.get("compression_method") or ""
             )
             if entry_strategy == strategy_key:
-                return entry
+                return _normalize_compression_result(key, entry)
     return None
 
 
@@ -1234,7 +1236,11 @@ def _build_model_comparison_options() -> dict:
             if not isinstance(entry, dict):
                 continue
 
-            strategy = _normalize_model_key(entry.get("strategy") or entry.get("compression_method") or "")
+            normalized_entry = _normalize_compression_result(model_key, entry)
+
+            strategy = _normalize_model_key(
+                normalized_entry.get("strategy") or normalized_entry.get("compression_method") or ""
+            )
             if not strategy or strategy == "baseline":
                 continue
 
@@ -1244,18 +1250,16 @@ def _build_model_comparison_options() -> dict:
 
             option_key = f"{model_key}::{strategy}"
             model_name = (
-                entry.get("model_name")
+                normalized_entry.get("model_name")
                 or PRELOADED_MODELS.get(model_key, {}).get("name")
                 or model_key
             )
-            size_mb = _first_numeric_value(entry, ("size_MB", "compressed_size_MB"))
+            size_mb = _first_numeric_value(normalized_entry, ("size_MB", "compressed_size_MB"))
             co2_kg = _first_numeric_value(
-                entry,
+                normalized_entry,
                 (
                     "compressed_total_emissions_kg",
                     "compressed_benchmark_total_emissions_kg",
-                    "training_co2_kg",
-                    "training_emissions_kg",
                     "inference_co2_kg",
                     "inference_emissions_kg",
                     "co2_kg",
@@ -1300,6 +1304,168 @@ def list_models():
     return models
 
 
+def _baseline_training_snapshot(model_key: str) -> tuple[Optional[float], Optional[float]]:
+    """Return immutable baseline training CO2/energy for a model from baseline source files."""
+    key = _normalize_model_key(model_key)
+    baseline_metrics = load_baseline_results().get(key, {})
+
+    training_co2 = _first_numeric_value(
+        baseline_metrics,
+        ("training_co2_kg", "training_emissions_kg", "co2_kg", "emissions_kg"),
+    )
+    training_energy = _first_numeric_value(
+        baseline_metrics,
+        ("training_energy_kwh", "energy_kwh"),
+    )
+
+    return training_co2, training_energy
+
+
+def _with_immutable_baseline_metrics(model_key: str, result: dict) -> dict:
+    """Attach immutable baseline training metrics so baseline fields cannot drift after compression."""
+    if not isinstance(result, dict):
+        return result
+
+    normalized = copy.deepcopy(result)
+    baseline_co2, baseline_energy = _baseline_training_snapshot(model_key)
+
+    if baseline_co2 is not None:
+        normalized["baseline_training_co2_kg"] = baseline_co2
+        if _first_numeric_value(normalized, ("baseline_total_emissions_kg", "baseline_benchmark_total_emissions_kg")) is None:
+            normalized["baseline_total_emissions_kg"] = baseline_co2
+
+    if baseline_energy is not None:
+        normalized["baseline_training_energy_kwh"] = baseline_energy
+        if _first_numeric_value(normalized, ("baseline_total_energy_kwh", "baseline_benchmark_total_energy_kwh")) is None:
+            normalized["baseline_total_energy_kwh"] = baseline_energy
+
+    return normalized
+
+
+def _compute_percent_reduction(baseline_value, compressed_value) -> Optional[float]:
+    """Compute percent reduction with robust numeric guards."""
+    baseline = _to_float(baseline_value)
+    compressed = _to_float(compressed_value)
+    if baseline is None or compressed is None or baseline <= 0:
+        return None
+    return round(((baseline - compressed) / baseline) * 100.0, 2)
+
+
+def _normalize_compression_result(model_key: str, result: dict) -> dict:
+    """Normalize one compression result into stable baseline/compressed fields.
+
+    This keeps immutable baseline-training metrics separate while preserving
+    fair benchmark totals when they exist.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    normalized = _with_immutable_baseline_metrics(model_key, result)
+
+    baseline_size_mb = _first_numeric_value(
+        normalized,
+        ("baseline_size_MB", "original_size_MB", "baseline_model_size_MB"),
+    )
+    compressed_size_mb = _first_numeric_value(
+        normalized,
+        ("compressed_size_MB", "size_MB"),
+    )
+
+    if baseline_size_mb is not None:
+        normalized["baseline_size_MB"] = round(baseline_size_mb, 2)
+    if compressed_size_mb is not None:
+        normalized["compressed_size_MB"] = round(compressed_size_mb, 2)
+        if _first_numeric_value(normalized, ("size_MB",)) is None:
+            normalized["size_MB"] = round(compressed_size_mb, 2)
+
+    baseline_total_co2 = _first_numeric_value(
+        normalized,
+        (
+            "baseline_total_emissions_kg",
+            "baseline_benchmark_total_emissions_kg",
+            "baseline_training_co2_kg",
+        ),
+    )
+    compressed_total_co2 = _first_numeric_value(
+        normalized,
+        (
+            "compressed_total_emissions_kg",
+            "compressed_benchmark_total_emissions_kg",
+            "co2_kg",
+            "emissions_kg",
+            "inference_co2_kg",
+            "inference_emissions_kg",
+        ),
+    )
+
+    projected_compressed_co2 = None
+    if (
+        baseline_total_co2 is not None
+        and baseline_total_co2 > 0
+        and baseline_size_mb is not None
+        and baseline_size_mb > 0
+        and compressed_size_mb is not None
+        and compressed_size_mb >= 0
+    ):
+        projected_compressed_co2 = round(
+            baseline_total_co2 * (compressed_size_mb / baseline_size_mb),
+            12,
+        )
+
+    # Keep a projected value for diagnostics, but do not override measured emissions.
+    if projected_compressed_co2 is not None:
+        normalized["compressed_projected_emissions_kg"] = projected_compressed_co2
+        if compressed_total_co2 is None:
+            compressed_total_co2 = projected_compressed_co2
+
+    if baseline_total_co2 is not None:
+        normalized["baseline_total_emissions_kg"] = round(baseline_total_co2, 12)
+    if compressed_total_co2 is not None:
+        normalized["compressed_total_emissions_kg"] = round(compressed_total_co2, 12)
+        normalized["co2_kg"] = round(compressed_total_co2, 12)
+        normalized["emissions_kg"] = round(compressed_total_co2, 12)
+
+    baseline_total_energy = _first_numeric_value(
+        normalized,
+        (
+            "baseline_total_energy_kwh",
+            "baseline_benchmark_total_energy_kwh",
+            "baseline_training_energy_kwh",
+        ),
+    )
+    compressed_total_energy = _first_numeric_value(
+        normalized,
+        (
+            "compressed_total_energy_kwh",
+            "compressed_benchmark_total_energy_kwh",
+            "energy_kwh",
+            "inference_energy_kwh",
+            "training_energy_kwh",
+        ),
+    )
+
+    if baseline_total_energy is not None:
+        normalized["baseline_total_energy_kwh"] = round(baseline_total_energy, 12)
+    if compressed_total_energy is not None:
+        normalized["compressed_total_energy_kwh"] = round(compressed_total_energy, 12)
+        normalized["energy_kwh"] = round(compressed_total_energy, 12)
+
+    co2_reduction = _compute_percent_reduction(baseline_total_co2, compressed_total_co2)
+    if co2_reduction is not None:
+        normalized["emissions_reduction_percent"] = co2_reduction
+
+    energy_reduction = _compute_percent_reduction(baseline_total_energy, compressed_total_energy)
+    if energy_reduction is not None:
+        normalized["energy_reduction_percent"] = energy_reduction
+
+    size_reduction = _compute_percent_reduction(baseline_size_mb, compressed_size_mb)
+    if size_reduction is not None:
+        normalized["size_reduction_percent"] = size_reduction
+
+    normalized["model_key"] = _normalize_model_key(model_key or normalized.get("model_key") or "")
+    return normalized
+
+
 def _save_to_compression_history(model_key: str, result: dict):
     """Append a compression result to the history file, keyed by model."""
     history_path = os.path.join(RESULTS_DIR, "compression_history.json")
@@ -1315,12 +1481,13 @@ def _save_to_compression_history(model_key: str, result: dict):
         history[model_key] = []
 
     # Deduplicate by strategy (keep latest)
-    strategy = result.get("strategy", result.get("compression_method", "unknown"))
+    normalized_result = _normalize_compression_result(model_key, result)
+    strategy = normalized_result.get("strategy", normalized_result.get("compression_method", "unknown"))
     history[model_key] = [
         r for r in history[model_key]
         if (r.get("strategy") or r.get("compression_method")) != strategy
     ]
-    history[model_key].append(result)
+    history[model_key].append(normalized_result)
 
     with open(history_path, "w") as f:
         json.dump(history, f, indent=2)
@@ -1426,6 +1593,59 @@ def load_baseline_results():
             "result_file": filename,
             "status": "ready",
         }
+
+    # Merge optional curated baseline catalog entries (fills gaps if per-model files are missing).
+    catalog_path = os.path.join(RESULTS_DIR, "baseline_all_models.json")
+    if os.path.exists(catalog_path):
+        try:
+            with open(catalog_path, "r") as f:
+                catalog = json.load(f)
+        except Exception:
+            catalog = None
+
+        if isinstance(catalog, dict):
+            for raw_key, payload in catalog.items():
+                if not isinstance(payload, dict):
+                    continue
+
+                model_key = _normalize_model_key(raw_key or payload.get("model_key") or payload.get("model_name") or "")
+                if not model_key:
+                    continue
+
+                entry = baselines.get(model_key, {
+                    "model_key": model_key,
+                    "model_name": payload.get("model_name") or raw_key,
+                    "params_label": payload.get("params_label"),
+                    "total_params": _to_int(payload.get("total_params", payload.get("parameters"))),
+                    "input_size": payload.get("input_size"),
+                    "dataset": payload.get("dataset", "CIFAR10"),
+                    "accuracy": _first_numeric_value(payload, ("accuracy", "baseline_accuracy", "accuracy_top1")),
+                    "size_MB": _first_numeric_value(payload, ("size_MB", "original_size_MB", "baseline_size_MB")),
+                    "latency_ms": payload.get("latency_ms"),
+                    "training_co2_kg": None,
+                    "training_energy_kwh": None,
+                    "result_updated_at": None,
+                    "result_file": os.path.basename(catalog_path),
+                    "status": "ready" if payload.get("status", "ready") != "error" else "error",
+                })
+
+                if entry.get("training_co2_kg") is None:
+                    entry["training_co2_kg"] = _first_numeric_value(
+                        payload,
+                        ("training_co2_kg", "training_emissions_kg", "co2_kg", "emissions_kg"),
+                    )
+                if entry.get("training_energy_kwh") is None:
+                    entry["training_energy_kwh"] = _first_numeric_value(
+                        payload,
+                        ("training_energy_kwh", "energy_kwh"),
+                    )
+
+                if isinstance(entry.get("accuracy"), (int, float)):
+                    entry["accuracy"] = round(float(entry["accuracy"]), 2)
+                if isinstance(entry.get("size_MB"), (int, float)):
+                    entry["size_MB"] = round(float(entry["size_MB"]), 2)
+
+                baselines[model_key] = entry
 
     return baselines
 
@@ -1870,8 +2090,6 @@ async def compare_models_on_image(req: ModelComparisonRequest):
         (
             "compressed_total_emissions_kg",
             "compressed_benchmark_total_emissions_kg",
-            "training_co2_kg",
-            "training_emissions_kg",
             "co2_kg",
             "emissions_kg",
             "inference_co2_kg",
@@ -1907,6 +2125,7 @@ async def compare_models_on_image(req: ModelComparisonRequest):
         size_reduction = round(((baseline_size - compressed_size) / baseline_size) * 100, 2)
 
     if (
+        compressed_co2 is None and
         baseline_co2 is not None and
         baseline_co2 > 0 and
         baseline_size is not None and
@@ -2423,7 +2642,23 @@ async def get_compression_history():
     if not os.path.exists(path):
         return {"history": {}}
     with open(path, "r") as f:
-        return {"history": json.load(f)}
+        history = json.load(f)
+
+    if not isinstance(history, dict):
+        return {"history": {}}
+
+    normalized_history = {}
+    for model_key, entries in history.items():
+        if not isinstance(entries, list):
+            continue
+        canonical_key = _normalize_model_key(model_key)
+        normalized_history[canonical_key] = [
+            _normalize_compression_result(canonical_key, entry)
+            for entry in entries
+            if isinstance(entry, dict)
+        ]
+
+    return {"history": normalized_history}
 
 
 @app.get("/api/results")
@@ -2494,44 +2729,99 @@ async def compare_strategies():
     Side-by-side comparison table of all compression strategies.
     Returns a normalized format for easy frontend rendering.
     """
+    history = load_json("compression_history.json")
     summary = load_json("compression_summary.json")
     energy = load_json("energy_report.json")
     evaluation = load_json("evaluation_report.json")
 
-    if summary is None:
+    if summary is None and not isinstance(history, dict):
         raise HTTPException(status_code=404, detail="No results found")
 
     comparison = []
-    for key, metrics in summary.items():
-        entry = {
-            "strategy": key,
-            "accuracy": metrics.get("accuracy",
-                        metrics.get("accuracy_top1", None)),
-            "size_MB": metrics.get("size_MB",
-                       metrics.get("size_MB_compressed",
-                       metrics.get("size_MB_sparse", None))),
-            "size_reduction_percent": metrics.get("size_reduction_percent",
-                                     metrics.get("size_reduction_compressed_percent", 0)),
-            "latency_ms": metrics.get("latency_ms", None),
-            "params": metrics.get("params",
-                      metrics.get("student_params",
-                      metrics.get("total_params", None))),
-        }
+    if isinstance(history, dict) and history:
+        baselines = load_baseline_results()
+        for model_key, entries in history.items():
+            canonical_key = _normalize_model_key(model_key)
+            if not isinstance(entries, list):
+                continue
 
-        # Add energy data if available
-        if energy and "inference" in energy:
-            inf_data = energy["inference"].get(key, {})
-            entry["inference_energy_kWh"] = inf_data.get("energy_kWh", None)
-            entry["co2_kg"] = inf_data.get("co2_kg", None)
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
 
-        # Add evaluation data if available
-        if evaluation and key in evaluation:
-            eval_data = evaluation[key]
-            entry["accuracy_top5"] = eval_data.get("accuracy_top5", None)
-            entry["flops_M"] = eval_data.get("flops_M", None)
-            entry["sparsity_percent"] = eval_data.get("sparsity_percent", None)
+                metrics = _normalize_compression_result(canonical_key, entry)
+                strategy_key = _normalize_model_key(
+                    metrics.get("strategy") or metrics.get("compression_method") or ""
+                )
+                if not strategy_key:
+                    continue
 
-        comparison.append(entry)
+                baseline_size = _first_numeric_value(
+                    baselines.get(canonical_key, {}),
+                    ("size_MB",),
+                )
+                compressed_size = _first_numeric_value(metrics, ("size_MB", "compressed_size_MB"))
+                size_reduction = _first_numeric_value(metrics, ("size_reduction_percent",))
+                if size_reduction is None:
+                    size_reduction = _compute_percent_reduction(baseline_size, compressed_size)
+
+                normalized_key = f"{canonical_key}::{strategy_key}"
+                model_name = metrics.get("model_name") or baselines.get(canonical_key, {}).get("model_name") or canonical_key
+
+                entry_obj = {
+                    "key": normalized_key,
+                    "model_key": canonical_key,
+                    "model_name": model_name,
+                    "strategy": strategy_key,
+                    "strategy_label": _strategy_label(strategy_key),
+                    "accuracy": _first_numeric_value(metrics, ("compressed_accuracy", "accuracy", "accuracy_top1")),
+                    "size_MB": compressed_size,
+                    "size_reduction_percent": size_reduction,
+                    "latency_ms": _first_numeric_value(metrics, ("latency_ms", "compressed_latency_ms")),
+                    "params": _to_int(metrics.get("params", metrics.get("student_params", metrics.get("total_params")))),
+                    "training_co2_kg": _first_numeric_value(metrics, ("training_co2_kg", "training_emissions_kg")),
+                    "inference_co2_kg": _first_numeric_value(metrics, ("inference_co2_kg", "inference_emissions_kg")),
+                    "baseline_co2_kg": _first_numeric_value(metrics, ("baseline_training_co2_kg", "baseline_total_emissions_kg")),
+                    "compressed_co2_kg": _first_numeric_value(metrics, ("compressed_total_emissions_kg", "co2_kg", "emissions_kg")),
+                    "co2_kg": _first_numeric_value(metrics, ("compressed_total_emissions_kg", "co2_kg", "emissions_kg")),
+                }
+
+                # Attach optional evaluation metrics when keys happen to align.
+                if evaluation and normalized_key in evaluation:
+                    eval_data = evaluation[normalized_key]
+                    entry_obj["accuracy_top5"] = eval_data.get("accuracy_top5", None)
+                    entry_obj["flops_M"] = eval_data.get("flops_M", None)
+                    entry_obj["sparsity_percent"] = eval_data.get("sparsity_percent", None)
+
+                comparison.append(entry_obj)
+
+        comparison.sort(key=lambda item: (str(item.get("model_name", "")).lower(), str(item.get("strategy", "")).lower()))
+
+    elif isinstance(summary, dict):
+        for key, metrics in summary.items():
+            entry = {
+                "strategy": key,
+                "accuracy": metrics.get("accuracy", metrics.get("accuracy_top1", None)),
+                "size_MB": metrics.get("size_MB", metrics.get("size_MB_compressed", metrics.get("size_MB_sparse", None))),
+                "size_reduction_percent": metrics.get("size_reduction_percent", metrics.get("size_reduction_compressed_percent", 0)),
+                "latency_ms": metrics.get("latency_ms", None),
+                "params": metrics.get("params", metrics.get("student_params", metrics.get("total_params", None))),
+            }
+
+            # Add energy data if available
+            if energy and "inference" in energy:
+                inf_data = energy["inference"].get(key, {})
+                entry["inference_energy_kWh"] = inf_data.get("energy_kWh", None)
+                entry["co2_kg"] = inf_data.get("co2_kg", None)
+
+            # Add evaluation data if available
+            if evaluation and key in evaluation:
+                eval_data = evaluation[key]
+                entry["accuracy_top5"] = eval_data.get("accuracy_top5", None)
+                entry["flops_M"] = eval_data.get("flops_M", None)
+                entry["sparsity_percent"] = eval_data.get("sparsity_percent", None)
+
+            comparison.append(entry)
 
     return {"comparison": comparison}
 
@@ -2571,21 +2861,19 @@ def run_script(script_name, task_key):
 
 
 @app.post("/api/compress")
-async def trigger_compression(background_tasks: BackgroundTasks):
+async def trigger_compression():
     """
-    Trigger the full compression pipeline in the background.
-    Returns immediately; check /api/task-status for progress.
+    Deprecated legacy endpoint.
+    Use /api/compress/preloaded for curated models or /api/compress/dynamic for uploads.
     """
-    if task_status["compress"]["running"]:
-        raise HTTPException(
-            status_code=409,
-            detail="Compression is already running"
-        )
-    background_tasks.add_task(run_script, "compress.py", "compress")
-    return {
-        "message": "Compression pipeline started in background",
-        "status_endpoint": "/api/task-status"
-    }
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Deprecated endpoint '/api/compress'. "
+            "Use '/api/compress/preloaded' for baseline-model compression "
+            "or '/api/compress/dynamic' for uploaded models."
+        ),
+    )
 
 
 @app.post("/api/evaluate")
@@ -2738,6 +3026,7 @@ async def compress_preloaded(req: PreloadedCompressRequest):
 
             # Remove internal path info
             result.pop("saved_path", None)
+            result = _normalize_compression_result(model_key, result)
 
             preloaded_task["result"] = result
             preloaded_task["step"] = "complete"
@@ -2892,6 +3181,8 @@ async def dynamic_compress(
 
         # Remove internal path info from result before returning
         result.pop("saved_path", None)
+        dynamic_model_key = _normalize_model_key(result.get("model_key") or os.path.splitext(filename)[0])
+        result = _normalize_compression_result(dynamic_model_key, result)
 
         dynamic_task["result"] = result
         dynamic_task["progress"] = "Complete"
@@ -2954,44 +3245,89 @@ async def dashboard():
     Aggregated dashboard data — combines results, energy, evaluation
     into one response for the frontend to render.
     """
+    history = load_json("compression_history.json") or {}
     summary = load_json("compression_summary.json") or {}
     energy = load_json("energy_report.json") or {}
     evaluation = load_json("evaluation_report.json") or {}
     models = list_models()
+    baselines = load_baseline_results()
 
-    # Build strategy cards
+    # Build strategy cards from normalized compression history (multi-model aware).
     strategies = []
-    baseline_data = summary.get("baseline", {})
-    baseline_size = baseline_data.get("size_MB", 44.81)
-    baseline_acc = baseline_data.get("accuracy", 0)
+    latest_entries = {}
+    if isinstance(history, dict):
+        for model_key, entries in history.items():
+            canonical_model_key = _normalize_model_key(model_key)
+            if not isinstance(entries, list):
+                continue
 
-    strategy_names = {
-        "baseline": "Baseline (ResNet18)",
-        "pruning_compressed": "Pruning 70% + Gzip",
-        "quantization_static": "Static Quantization INT8",
-        "quantization_dynamic": "Dynamic Quantization",
-        "kd_compact_student": "KD → Compact Student",
-        "hybrid_student_quant": "Student + Quantization",
-        "ultra_compact": "Ultra-Compact",
-    }
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
 
-    for key, display_name in strategy_names.items():
-        if key not in summary:
+                normalized_entry = _normalize_compression_result(canonical_model_key, entry)
+                strategy_key = _normalize_model_key(
+                    normalized_entry.get("strategy") or normalized_entry.get("compression_method") or ""
+                )
+                if not strategy_key or strategy_key == "baseline":
+                    continue
+
+                latest_entries[f"{canonical_model_key}::{strategy_key}"] = normalized_entry
+
+    for composite_key in sorted(latest_entries.keys()):
+        model_key, strategy_key = composite_key.split("::", 1)
+        m = latest_entries[composite_key]
+        baseline_meta = baselines.get(model_key, {})
+
+        baseline_size = _first_numeric_value(baseline_meta, ("size_MB",))
+        if baseline_size is None:
+            baseline_size = _first_numeric_value(m, ("baseline_size_MB", "original_size_MB"))
+
+        size_mb = _first_numeric_value(m, ("size_MB", "compressed_size_MB"))
+        if size_mb is None:
             continue
-        m = summary[key]
-        size = m.get("size_MB", m.get("size_MB_compressed",
-               m.get("size_MB_sparse", baseline_size)))
+
+        size_reduction = _compute_percent_reduction(baseline_size, size_mb)
+        model_label = m.get("model_name") or baseline_meta.get("model_name") or model_key
+
         strategies.append({
-            "key": key,
-            "name": display_name,
-            "accuracy": m.get("accuracy", 0),
-            "size_MB": size,
-            "size_reduction": round(100 * (baseline_size - size) / baseline_size, 2)
-                             if baseline_size > 0 else 0,
-            "latency_ms": m.get("latency_ms", 0),
-            "params": m.get("params", m.get("student_params",
-                     m.get("total_params", 0))),
+            "key": composite_key,
+            "name": f"{model_label} · {_strategy_label(strategy_key)}",
+            "accuracy": _first_numeric_value(m, ("compressed_accuracy", "accuracy", "accuracy_top1")) or 0,
+            "size_MB": round(size_mb, 2),
+            "size_reduction": size_reduction if size_reduction is not None else 0,
+            "latency_ms": _first_numeric_value(m, ("latency_ms", "compressed_latency_ms")),
+            "params": _to_int(m.get("params", m.get("student_params", m.get("total_params")))) or 0,
         })
+
+    # Backward-compatible fallback for older single-model summary files.
+    if not strategies and isinstance(summary, dict):
+        baseline_data = summary.get("baseline", {})
+        baseline_size = _first_numeric_value(baseline_data, ("size_MB",)) or 44.81
+        strategy_names = {
+            "baseline": "Baseline (ResNet18)",
+            "pruning_compressed": "Pruning 70% + Gzip",
+            "quantization_static": "Static Quantization INT8",
+            "quantization_dynamic": "Dynamic Quantization",
+            "kd_compact_student": "KD → Compact Student",
+            "hybrid_student_quant": "Student + Quantization",
+            "ultra_compact": "Ultra-Compact",
+        }
+
+        for key, display_name in strategy_names.items():
+            if key not in summary:
+                continue
+            m = summary[key]
+            size = m.get("size_MB", m.get("size_MB_compressed", m.get("size_MB_sparse", baseline_size)))
+            strategies.append({
+                "key": key,
+                "name": display_name,
+                "accuracy": m.get("accuracy", 0),
+                "size_MB": size,
+                "size_reduction": round(100 * (baseline_size - size) / baseline_size, 2) if baseline_size > 0 else 0,
+                "latency_ms": m.get("latency_ms", 0),
+                "params": m.get("params", m.get("student_params", m.get("total_params", 0))),
+            })
 
     return {
         "strategies": strategies,

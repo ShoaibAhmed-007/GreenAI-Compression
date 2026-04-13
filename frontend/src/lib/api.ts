@@ -114,7 +114,8 @@ export function normalizeDynamicResult(result: DynamicResult): DynamicResult {
   const safeBaselineSize = baselineSize ?? compressedSize ?? 0;
   const safeCompressedSize = compressedSize ?? safeBaselineSize;
 
-  const baselineTotalCo2 = toFiniteNumber(result.baseline_total_emissions_kg);
+  const immutableBaselineTrainingCo2 = toFiniteNumber(result.baseline_training_co2_kg);
+  const baselineTotalCo2 = immutableBaselineTrainingCo2 ?? toFiniteNumber(result.baseline_total_emissions_kg);
   const fallbackCompressedCo2 =
     toFiniteNumber(result.compressed_total_emissions_kg) ??
     toFiniteNumber(result.co2_kg) ??
@@ -138,6 +139,8 @@ export function normalizeDynamicResult(result: DynamicResult): DynamicResult {
     baseline_size_MB: safeBaselineSize,
     size_MB: safeCompressedSize,
     size_reduction_percent: Number(reduction.toFixed(2)),
+    baseline_training_co2_kg:
+      immutableBaselineTrainingCo2 ?? result.baseline_training_co2_kg,
     baseline_total_emissions_kg: baselineTotalCo2 ?? result.baseline_total_emissions_kg,
     compressed_total_emissions_kg:
       normalizedCompressedCo2 ?? result.compressed_total_emissions_kg,
@@ -237,8 +240,10 @@ export interface DynamicResult {
   compressed_latency_ms?: number;
   latency_speedup_percent?: number;
   baseline_total_emissions_kg?: number;
+  baseline_training_co2_kg?: number;
   compressed_total_emissions_kg?: number;
   baseline_total_energy_kwh?: number;
+  baseline_training_energy_kwh?: number;
   compressed_total_energy_kwh?: number;
   emissions_reduction_percent?: number;
   energy_reduction_percent?: number;
@@ -254,7 +259,10 @@ export interface Strategy {
   accuracy: number;
   size_MB: number;
   size_reduction: number;
-  // latency_ms: number;
+  latency_ms?: number;
+  baseline_latency_ms?: number;
+  compressed_latency_ms?: number;
+  latency_speedup_percent?: number;
   params: number;
   inference_energy_kWh?: number;
   training_energy_kwh?: number;
@@ -849,7 +857,7 @@ export function dynamicResultToStrategy(r: DynamicResult): Strategy {
   const normalized = normalizeDynamicResult(r);
   const modelLabel = normalized.model_name || normalized.model_key || 'Custom';
   const methodLabel = normalized.compression_method || normalized.strategy || '';
-  const baselineTotalCo2 = normalized.baseline_total_emissions_kg;
+  const baselineTotalCo2 = normalized.baseline_training_co2_kg ?? normalized.baseline_total_emissions_kg;
   const compressedTotalCo2 = normalized.compressed_total_emissions_kg;
   const trainingCo2 = normalized.training_co2_kg ?? normalized.training_emissions_kg;
   const totalCo2 = compressedTotalCo2;
@@ -866,7 +874,7 @@ export function dynamicResultToStrategy(r: DynamicResult): Strategy {
     // latency_ms: r.latency_ms,
     params: normalized.total_params || normalized.nonzero_params || 0,
     baseline_co2_kg: baselineTotalCo2 ?? undefined,
-    compressed_co2_kg: compressedTotalCo2 ?? trainingCo2 ?? inferenceCo2,
+    compressed_co2_kg: compressedTotalCo2 ?? inferenceCo2,
     co2_kg: totalCo2 ?? inferenceCo2,
     training_co2_kg: trainingCo2,
     inference_co2_kg: inferenceCo2,

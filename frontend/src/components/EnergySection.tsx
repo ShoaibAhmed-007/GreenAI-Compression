@@ -59,12 +59,14 @@ export function EnergySection({
       const modelKey = normalizeModelKey(result.model_key || result.model_name);
       const baseline = baselines[modelKey];
 
-      const baselineCo2 = toFiniteNumber(result.baseline_total_emissions_kg ?? baseline?.training_co2_kg);
+      const baselineCo2 = toFiniteNumber(
+        baseline?.training_co2_kg ?? result.baseline_training_co2_kg ?? result.baseline_total_emissions_kg
+      );
       const compressedTrainCo2 = toFiniteNumber(result.training_co2_kg ?? result.training_emissions_kg);
       const compressedInferCo2 = toFiniteNumber(
         result.inference_co2_kg ?? result.inference_emissions_kg ?? result.emissions_kg
       );
-      const compressedCo2 = toFiniteNumber(result.compressed_total_emissions_kg) ?? compressedTrainCo2 ?? compressedInferCo2;
+      const compressedCo2 = toFiniteNumber(result.compressed_total_emissions_kg) ?? compressedInferCo2 ?? compressedTrainCo2;
 
       const reductionPercent =
         baselineCo2 != null && baselineCo2 > 0 && compressedCo2 != null
