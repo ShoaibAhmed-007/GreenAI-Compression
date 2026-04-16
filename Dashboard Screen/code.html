@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>GreenAI Dashboard | Sustainable Edge Intelligence</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&amp;family=Plus+Jakarta+Sans:wght@300;400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "surface-variant": "#333532",
+                        "surface-container-highest": "#333532",
+                        "secondary-fixed": "#cbedb4",
+                        "on-tertiary-fixed-variant": "#065043",
+                        "surface": "#121411",
+                        "surface-container": "#1e201d",
+                        "surface-dim": "#121411",
+                        "on-error-container": "#ffdad6",
+                        "on-primary-fixed": "#002114",
+                        "primary": "#5bdda8",
+                        "on-tertiary-fixed": "#00201a",
+                        "on-primary-fixed-variant": "#005138",
+                        "outline": "#8c9387",
+                        "primary-fixed": "#7afac3",
+                        "error": "#ffb4ab",
+                        "inverse-on-surface": "#2f312e",
+                        "tertiary-fixed-dim": "#94d3c1",
+                        "tertiary-container": "#175a4c",
+                        "inverse-primary": "#006c4b",
+                        "background": "#121411",
+                        "error-container": "#93000a",
+                        "outline-variant": "#42493e",
+                        "surface-container-high": "#292b27",
+                        "on-secondary-fixed-variant": "#324e24",
+                        "on-secondary": "#1c3710",
+                        "primary-fixed-dim": "#5bdda8",
+                        "on-primary": "#003826",
+                        "surface-container-lowest": "#0d0f0c",
+                        "secondary-container": "#324e24",
+                        "inverse-surface": "#e3e3de",
+                        "surface-container-low": "#1a1c19",
+                        "primary-container": "#005c40",
+                        "on-error": "#690005",
+                        "tertiary": "#94d3c1",
+                        "on-surface-variant": "#c2c9bb",
+                        "secondary": "#afd09a",
+                        "on-primary-container": "#57d9a5",
+                        "on-secondary-container": "#9ebf8a",
+                        "on-secondary-fixed": "#072100",
+                        "on-background": "#e3e3de",
+                        "on-surface": "#e3e3de",
+                        "tertiary-fixed": "#afefdd",
+                        "on-tertiary-container": "#90cfbe",
+                        "secondary-fixed-dim": "#afd09a",
+                        "surface-tint": "#5bdda8",
+                        "surface-bright": "#383a36",
+                        "on-tertiary": "#00382e"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "fontFamily": {
+                        "headline": ["Space Grotesk"],
+                        "body": ["Plus Jakarta Sans"],
+                        "label": ["Plus Jakarta Sans"],
+                        "technical": ["JetBrains Mono"]
+                    }
+                },
+            }
+        }
+    </script>
+<style>
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+        .font-headline { font-family: 'Space Grotesk', sans-serif; }
+        .font-technical { font-family: 'JetBrains Mono', monospace; }
+        .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+        .glass-panel {
+            background: rgba(51, 53, 50, 0.6);
+            backdrop-filter: blur(12px);
+        }
+        .asymmetric-hero {
+            border-top-left-radius: 2rem;
+            border-bottom-right-radius: 2rem;
+        }
+    </style>
+</head>
+<body class="bg-surface text-on-surface selection:bg-primary selection:text-on-primary">
+<!-- SideNavBar (Authority: JSON) -->
+<aside class="h-screen w-64 fixed left-0 top-0 bg-zinc-950 flex flex-col py-4 space-y-2 z-40 hidden md:flex">
+<div class="px-6 mb-8">
+<h1 class="text-emerald-500 font-bold text-2xl font-headline tracking-tighter">GreenAI</h1>
+<p class="text-[0.65rem] text-zinc-500 font-technical uppercase tracking-widest">Sustainable Edge Intelligence</p>
+</div>
+<nav class="flex-1 space-y-1">
+<a class="flex items-center gap-3 px-6 py-3 bg-emerald-500/10 text-emerald-400 rounded-lg mx-2 transition-colors duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+<span class="font-medium">Dashboard</span>
+</a>
+<a class="flex items-center gap-3 px-6 py-3 text-zinc-500 hover:text-emerald-200 hover:bg-zinc-900 transition-colors duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="compare_arrows">compare_arrows</span>
+<span class="font-medium">Model Comparison</span>
+</a>
+</nav>
+<div class="mt-auto px-4">
+<div class="bg-emerald-500/5 p-4 rounded-xl border border-emerald-500/10 text-center">
+<p class="text-xs text-emerald-400/60 font-technical mb-2">FYP 2025-26</p>
+<div class="w-10 h-10 rounded-full bg-emerald-500/20 mx-auto flex items-center justify-center">
+<span class="material-symbols-outlined text-emerald-400" data-icon="eco">eco</span>
+</div>
+</div>
+</div>
+</aside>
+<main class="md:ml-64 min-h-screen">
+<!-- TopNavBar (Authority: JSON) -->
+<header class="fixed top-0 right-0 left-0 md:left-64 z-50 bg-emerald-950/60 backdrop-blur-xl shadow-2xl shadow-emerald-950/50 flex justify-between items-center px-6 py-3">
+<div class="flex items-center gap-4">
+<span class="material-symbols-outlined text-emerald-400 md:hidden" data-icon="menu">menu</span>
+<div class="relative hidden sm:block">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-emerald-100/40 text-sm" data-icon="search">search</span>
+<input class="bg-emerald-900/20 border-none rounded-full pl-10 pr-4 py-1.5 text-sm text-emerald-100 placeholder:text-emerald-100/40 focus:ring-1 focus:ring-emerald-500 w-64 transition-all" placeholder="Search experiments..." type="text"/>
+</div>
+</div>
+<div class="flex items-center gap-6">
+<a class="text-emerald-100/60 hover:text-emerald-100 text-sm font-medium transition-all" href="#">API Docs</a>
+<button class="relative text-emerald-100/60 hover:text-emerald-100 transition-all active:scale-90">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+<span class="absolute top-0 right-0 w-2 h-2 bg-emerald-500 rounded-full border-2 border-emerald-950"></span>
+</button>
+<div class="w-8 h-8 rounded-full overflow-hidden border border-emerald-500/20 cursor-pointer hover:scale-95 transition-transform">
+<img alt="User profile settings" class="w-full h-full object-cover" data-alt="portrait of a focused professional software engineer in a modern dark lit office studio" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDONPXvtkvvCEcb4bNxkc_BtfeWs3_VaBCV8ebTa3hsAy1FbNCvMLUbW1SYlT7OKtJG2dPPkowLsjiNZq1vV3uCC712la6dr9KwSDDSUcbH3JskP5Ccoyu9plLcw8hQiPIfn25gWXfqHSwTPcqp1gLe8Otmb8jipRoKtvvoHVbPpReoTXo0o7Da6O0opRZ8oK_9zO6PSs6ZpfZznKwbNQqUF1EGPJb796wfTn1EzKwR8xxHOlEOzkvhInLf25crX2JcDF9jZqKniNo"/>
+</div>
+</div>
+</header>
+<!-- Content Area -->
+<div class="pt-24 px-8 pb-12 space-y-10">
+<!-- Dashboard Header & Actions -->
+<div class="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
+<div>
+<h2 class="text-4xl font-headline font-bold text-on-surface tracking-tight">System Overview</h2>
+<p class="text-on-surface-variant mt-2 max-w-xl">Monitor your machine learning efficiency metrics and coordinate model compression pipelines for sustainable edge deployment.</p>
+</div>
+<div class="flex items-center gap-3">
+<button class="bg-zinc-900 hover:bg-zinc-800 text-zinc-400 px-5 py-2.5 rounded-xl font-medium text-sm transition-all flex items-center gap-2">
+<span class="material-symbols-outlined text-lg" data-icon="delete_sweep">delete_sweep</span>
+                        Clear History
+                    </button>
+<button class="bg-gradient-to-br from-primary to-primary-container text-on-primary px-6 py-2.5 rounded-xl font-bold text-sm shadow-lg shadow-primary/20 hover:scale-[1.02] transition-all flex items-center gap-2">
+<span class="material-symbols-outlined text-lg" data-icon="analytics">analytics</span>
+                        Compare Models on Images
+                    </button>
+</div>
+</div>
+<!-- Stats Grid -->
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+<div class="bg-surface-container p-6 rounded-2xl flex flex-col justify-between">
+<div class="flex justify-between items-start">
+<span class="text-on-surface-variant text-xs font-semibold uppercase tracking-wider">Baseline Accuracy</span>
+<span class="material-symbols-outlined text-primary" data-icon="target">target</span>
+</div>
+<div class="mt-4">
+<p class="text-3xl font-technical font-bold text-on-surface">94.2<span class="text-lg opacity-50">%</span></p>
+<p class="text-xs text-primary mt-1 flex items-center gap-1">
+<span class="material-symbols-outlined text-xs" data-icon="trending_up">trending_up</span>
+                            +1.2% from V2
+                        </p>
+</div>
+</div>
+<div class="bg-surface-container p-6 rounded-2xl flex flex-col justify-between">
+<div class="flex justify-between items-start">
+<span class="text-on-surface-variant text-xs font-semibold uppercase tracking-wider">Best Compression</span>
+<span class="material-symbols-outlined text-secondary" data-icon="compress">compress</span>
+</div>
+<div class="mt-4">
+<p class="text-3xl font-technical font-bold text-on-surface">8.4<span class="text-lg opacity-50">x</span></p>
+<p class="text-xs text-secondary mt-1">INT8 Quantization</p>
+</div>
+</div>
+<div class="bg-surface-container p-6 rounded-2xl flex flex-col justify-between">
+<div class="flex justify-between items-start">
+<span class="text-on-surface-variant text-xs font-semibold uppercase tracking-wider">Smallest Model</span>
+<span class="material-symbols-outlined text-tertiary" data-icon="memory">memory</span>
+</div>
+<div class="mt-4">
+<p class="text-3xl font-technical font-bold text-on-surface">2.8<span class="text-lg opacity-50">MB</span></p>
+<p class="text-xs text-on-surface-variant mt-1">SqueezeNet Variant</p>
+</div>
+</div>
+<div class="bg-surface-container p-6 rounded-2xl flex flex-col justify-between">
+<div class="flex justify-between items-start">
+<span class="text-on-surface-variant text-xs font-semibold uppercase tracking-wider">Device Status</span>
+<div class="flex gap-1">
+<div class="w-2 h-2 rounded-full bg-primary animate-pulse"></div>
+<span class="text-[10px] text-primary font-technical uppercase">Active</span>
+</div>
+</div>
+<div class="mt-4 flex flex-col gap-2">
+<div class="flex justify-between text-xs font-technical">
+<span class="text-on-surface-variant">GPU (A100)</span>
+<span class="text-on-surface">42% Load</span>
+</div>
+<div class="w-full bg-surface-container-low h-1 rounded-full overflow-hidden">
+<div class="bg-primary h-full w-[42%]"></div>
+</div>
+<div class="flex justify-between text-xs font-technical">
+<span class="text-on-surface-variant">CPU Usage</span>
+<span class="text-on-surface">18% Load</span>
+</div>
+</div>
+</div>
+</div>
+<!-- Prepare Models Panel -->
+<section class="asymmetric-hero bg-gradient-to-r from-surface-container to-surface-container-high p-8 flex flex-col md:flex-row items-center gap-10">
+<div class="flex-1 w-full">
+<div class="flex items-center gap-3 mb-6">
+<div class="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+<span class="material-symbols-outlined text-primary" data-icon="settings_b_roll">settings_b_roll</span>
+</div>
+<div>
+<h3 class="text-xl font-headline font-semibold">Prepare Models</h3>
+<p class="text-sm text-on-surface-variant">Running automated pruning pass on ResNet-50</p>
+</div>
+</div>
+<div class="space-y-4">
+<div class="flex justify-between items-end mb-1">
+<span class="text-xs font-technical text-primary">TRAINING PROGRESS</span>
+<span class="text-xs font-technical text-on-surface">68%</span>
+</div>
+<div class="w-full bg-surface-container-lowest h-3 rounded-full overflow-hidden">
+<div class="bg-gradient-to-r from-primary/40 to-primary h-full w-[68%] relative">
+<div class="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(255,255,255,0.1)_50%,transparent_75%)] bg-[length:20px_20px]"></div>
+</div>
+</div>
+<div class="flex items-start gap-3 bg-error-container/10 p-3 rounded-xl border border-error/5">
+<span class="material-symbols-outlined text-error text-lg" data-icon="warning">warning</span>
+<p class="text-xs text-on-error-container leading-relaxed">
+<span class="font-bold">Optimization Warning:</span> Thermal throttling detected on Node-04. Slowing down compression iterations to maintain hardware health.
+                            </p>
+</div>
+</div>
+</div>
+<div class="hidden lg:block w-72 h-48 rounded-2xl overflow-hidden shadow-2xl relative">
+<img alt="Visualization of neural network nodes" class="w-full h-full object-cover opacity-60" data-alt="abstract visualization of a 3D neural network structure with glowing green nodes and interconnected lines on a dark background" src="https://lh3.googleusercontent.com/aida-public/AB6AXuA_F0NtZjMinv_BMsSR6QmJRL8Jt2ebB2WFPpMXij1MzevIgSTP7kyCSpfbroLuEDnPIyEq-_AtlHS5kwmI14vHDYNYLHA9s66g3Yh6rcMcUCzDLJixfBHGOzrRpePCWmiw_iZiS-Y2Oe4fuRPwdy8GVYF3GS2bn63VdS2m8ZTomGdM4gUccKrlkCgD1QjD-xQbLoBtmsMRQXh8WpVwzJQo55PqVBU60vvUadM9mX1OFlb74ct1RTxSIdeLY4JQI-ScyQTipRvTu4o"/>
+<div class="absolute inset-0 bg-gradient-to-t from-surface-container/80 to-transparent flex items-end p-4">
+<p class="text-[10px] font-technical text-primary tracking-widest uppercase">Real-time Topology Analysis</p>
+</div>
+</div>
+</section>
+<!-- Library and Analysis -->
+<div class="grid grid-cols-1 xl:grid-cols-3 gap-8">
+<!-- Model Library Grid (2/3 width) -->
+<div class="xl:col-span-2 space-y-6">
+<div class="flex items-center justify-between">
+<h3 class="text-2xl font-headline font-bold">Model Library</h3>
+<div class="flex gap-2">
+<button class="p-2 rounded-lg bg-surface-container-high text-on-surface-variant hover:text-primary transition-colors">
+<span class="material-symbols-outlined" data-icon="grid_view">grid_view</span>
+</button>
+<button class="p-2 rounded-lg text-on-surface-variant hover:text-primary transition-colors">
+<span class="material-symbols-outlined" data-icon="view_list">view_list</span>
+</button>
+</div>
+</div>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+<!-- Model Card 1 -->
+<div class="bg-surface-container-low p-6 rounded-2xl border border-outline-variant/10 hover:border-primary/20 transition-all group">
+<div class="flex justify-between items-start mb-4">
+<div class="bg-primary/10 p-2 rounded-lg">
+<span class="material-symbols-outlined text-primary" data-icon="filter_vintage">filter_vintage</span>
+</div>
+<span class="bg-surface-container-highest px-2 py-1 rounded text-[10px] font-technical text-on-surface-variant">5 VARIANTS</span>
+</div>
+<h4 class="text-lg font-bold mb-1">ResNet-50 v2</h4>
+<p class="text-xs text-on-surface-variant mb-6">Image Classification Backbone</p>
+<div class="grid grid-cols-2 gap-4 mb-6">
+<div class="bg-surface-container-lowest p-3 rounded-xl">
+<p class="text-[10px] text-on-surface-variant uppercase font-technical mb-1">Accuracy</p>
+<p class="text-sm font-technical text-on-surface">92.45%</p>
+</div>
+<div class="bg-surface-container-lowest p-3 rounded-xl">
+<p class="text-[10px] text-on-surface-variant uppercase font-technical mb-1">Model Size</p>
+<p class="text-sm font-technical text-on-surface">98.2 MB</p>
+</div>
+</div>
+<div class="flex items-center justify-between pt-4 border-t border-outline-variant/5">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-xs text-secondary" data-icon="cloud_queue">cloud_queue</span>
+<span class="text-[10px] font-technical text-secondary">0.42kg CO2e</span>
+</div>
+<button class="text-xs font-bold text-primary flex items-center gap-1 group-hover:gap-2 transition-all">
+                                    COMPRESS <span class="material-symbols-outlined text-sm" data-icon="chevron_right">chevron_right</span>
+</button>
+</div>
+</div>
+<!-- Model Card 2 -->
+<div class="bg-surface-container-low p-6 rounded-2xl border border-outline-variant/10 hover:border-primary/20 transition-all group">
+<div class="flex justify-between items-start mb-4">
+<div class="bg-secondary/10 p-2 rounded-lg">
+<span class="material-symbols-outlined text-secondary" data-icon="bolt">bolt</span>
+</div>
+<span class="bg-surface-container-highest px-2 py-1 rounded text-[10px] font-technical text-on-surface-variant">3 VARIANTS</span>
+</div>
+<h4 class="text-lg font-bold mb-1">MobileNet V3</h4>
+<p class="text-xs text-on-surface-variant mb-6">Edge Optimized Mobile Vision</p>
+<div class="grid grid-cols-2 gap-4 mb-6">
+<div class="bg-surface-container-lowest p-3 rounded-xl">
+<p class="text-[10px] text-on-surface-variant uppercase font-technical mb-1">Accuracy</p>
+<p class="text-sm font-technical text-on-surface">75.12%</p>
+</div>
+<div class="bg-surface-container-lowest p-3 rounded-xl">
+<p class="text-[10px] text-on-surface-variant uppercase font-technical mb-1">Model Size</p>
+<p class="text-sm font-technical text-on-surface">15.4 MB</p>
+</div>
+</div>
+<div class="flex items-center justify-between pt-4 border-t border-outline-variant/5">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-xs text-secondary" data-icon="cloud_queue">cloud_queue</span>
+<span class="text-[10px] font-technical text-secondary">0.08kg CO2e</span>
+</div>
+<button class="text-xs font-bold text-primary flex items-center gap-1 group-hover:gap-2 transition-all">
+                                    COMPRESS <span class="material-symbols-outlined text-sm" data-icon="chevron_right">chevron_right</span>
+</button>
+</div>
+</div>
+</div>
+<!-- Expandable Detail (Simulated) -->
+<div class="bg-surface-container rounded-2xl overflow-hidden border border-primary/10">
+<div class="p-6 border-b border-outline-variant/10 flex justify-between items-center">
+<h4 class="font-headline font-semibold">Active Pipeline: ResNet-50 Expansion</h4>
+<span class="material-symbols-outlined text-on-surface-variant cursor-pointer" data-icon="keyboard_arrow_up">keyboard_arrow_up</span>
+</div>
+<div class="p-8 grid grid-cols-1 md:grid-cols-3 gap-8">
+<div class="md:col-span-1 space-y-4">
+<p class="text-xs font-bold text-on-surface-variant uppercase tracking-widest">Technique Selector</p>
+<div class="space-y-2">
+<button class="w-full text-left p-3 rounded-xl bg-primary text-on-primary text-sm font-medium flex justify-between items-center">
+                                        Weight Pruning
+                                        <span class="material-symbols-outlined text-sm" data-icon="check_circle" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+</button>
+<button class="w-full text-left p-3 rounded-xl bg-surface-container-low hover:bg-surface-container-high transition-colors text-on-surface-variant text-sm font-medium">
+                                        INT8 Quantization
+                                    </button>
+<button class="w-full text-left p-3 rounded-xl bg-surface-container-low hover:bg-surface-container-high transition-colors text-on-surface-variant text-sm font-medium">
+                                        Knowledge Distillation
+                                    </button>
+</div>
+<button class="w-full mt-4 py-3 bg-primary-container text-on-primary-container rounded-xl font-bold text-sm">
+                                    Execute Compression
+                                </button>
+</div>
+<div class="md:col-span-2 bg-surface-container-low rounded-2xl p-6">
+<p class="text-xs font-bold text-on-surface-variant uppercase tracking-widest mb-4">Estimated Results</p>
+<div class="grid grid-cols-2 gap-6">
+<div class="space-y-1">
+<p class="text-xs text-on-surface-variant">Size Reduction</p>
+<p class="text-2xl font-technical text-primary">-82%</p>
+<div class="w-full h-1 bg-surface-container-lowest rounded-full">
+<div class="w-[82%] h-full bg-primary rounded-full"></div>
+</div>
+</div>
+<div class="space-y-1">
+<p class="text-xs text-on-surface-variant">Accuracy Drop</p>
+<p class="text-2xl font-technical text-error">1.4%</p>
+<div class="w-full h-1 bg-surface-container-lowest rounded-full">
+<div class="w-[14%] h-full bg-error rounded-full"></div>
+</div>
+</div>
+<div class="space-y-1">
+<p class="text-xs text-on-surface-variant">Latency Improvement</p>
+<p class="text-2xl font-technical text-tertiary">3.5x</p>
+<div class="w-full h-1 bg-surface-container-lowest rounded-full">
+<div class="w-[60%] h-full bg-tertiary rounded-full"></div>
+</div>
+</div>
+<div class="space-y-1">
+<p class="text-xs text-on-surface-variant">Energy Saved</p>
+<p class="text-2xl font-technical text-secondary">64%</p>
+<div class="w-full h-1 bg-surface-container-lowest rounded-full">
+<div class="w-[64%] h-full bg-secondary rounded-full"></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Analysis Sidebar (1/3 width) -->
+<div class="space-y-8">
+<!-- Energy & Carbon Comparisons -->
+<div class="bg-surface-container p-6 rounded-2xl space-y-6">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-secondary" data-icon="energy_savings_leaf">energy_savings_leaf</span>
+<h4 class="font-headline font-semibold">Sustainability Impact</h4>
+</div>
+<div class="space-y-4">
+<div class="bg-surface-container-low p-4 rounded-xl border-l-4 border-error">
+<div class="flex justify-between items-center mb-1">
+<span class="text-[10px] font-technical text-on-surface-variant">BASELINE EMISSIONS</span>
+<span class="text-sm font-technical text-on-surface">4.82kg CO2e</span>
+</div>
+<p class="text-[10px] text-on-surface-variant">Standard training run, no optimization.</p>
+</div>
+<div class="bg-surface-container-low p-4 rounded-xl border-l-4 border-primary">
+<div class="flex justify-between items-center mb-1">
+<span class="text-[10px] font-technical text-on-surface-variant">COMPRESSED EMISSIONS</span>
+<span class="text-sm font-technical text-primary">0.95kg CO2e</span>
+</div>
+<p class="text-[10px] text-on-surface-variant">Compressed deployment target.</p>
+</div>
+<div class="bg-primary/10 p-4 rounded-xl text-center">
+<p class="text-[10px] text-primary uppercase font-bold tracking-widest mb-1">Total Carbon Reduction</p>
+<p class="text-4xl font-headline font-bold text-primary">80.3%</p>
+</div>
+</div>
+</div>
+<!-- Comparison Table/Chart Tabs -->
+<div class="bg-surface-container p-6 rounded-2xl">
+<div class="flex gap-4 border-b border-outline-variant/10 pb-4 mb-6 overflow-x-auto">
+<button class="text-xs font-bold text-primary border-b-2 border-primary pb-2 whitespace-nowrap">SIZE ANALYSIS</button>
+<button class="text-xs font-bold text-on-surface-variant hover:text-on-surface pb-2 whitespace-nowrap transition-colors">CARBON FOOTPRINT</button>
+<button class="text-xs font-bold text-on-surface-variant hover:text-on-surface pb-2 whitespace-nowrap transition-colors">RADAR COMPARISON</button>
+</div>
+<!-- Mini Table -->
+<div class="space-y-3">
+<div class="grid grid-cols-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-widest px-2">
+<span>Variant</span>
+<span class="text-center">mAP</span>
+<span class="text-right">Size</span>
+</div>
+<div class="bg-surface-container-low p-3 rounded-lg grid grid-cols-3 text-xs font-technical border border-outline-variant/10">
+<span class="text-on-surface-variant">Baseline</span>
+<span class="text-center">94.2%</span>
+<span class="text-right">98MB</span>
+</div>
+<div class="bg-primary/5 p-3 rounded-lg grid grid-cols-3 text-xs font-technical border border-primary/20">
+<span class="text-primary font-bold">Best Opt</span>
+<span class="text-center text-primary">92.8%</span>
+<span class="text-right text-primary">12MB</span>
+</div>
+<div class="bg-surface-container-low p-3 rounded-lg grid grid-cols-3 text-xs font-technical opacity-50">
+<span class="text-on-surface-variant">Fast Pass</span>
+<span class="text-center">88.1%</span>
+<span class="text-right">8MB</span>
+</div>
+</div>
+<div class="mt-8">
+<img alt="Energy usage chart" class="w-full h-32 object-cover rounded-xl opacity-40" data-alt="a sleek dark-themed line chart showing a dramatic decline in energy usage over time, rendered in bright emerald green with soft glowing effects" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBy0JC3bhvreW3xKmaqNQYBopAu79nAK8I-613SdYtEYKsOfUc9v1S54Ir5MzHaCPAPYbnQWgDkbWsuQ3HGGIPb8fx8v9RpHVklxSNz_UurqRGOsw1-vZzNfIH3PVhKOB2w6D2YFks1hqaGrJbTs4o_wGeUdGRMf0qz8nn1Q8wg9-7x8odaYObAoPMAYj2k4V26bYc10qI9I5YPgn_heeg0WoWC9qTkU2GSpdNnc0Jfp4mKuaKimioQ9-pbTslAeadCY6OMpkDyy0Y"/>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Footer (Authority: JSON) -->
+<footer class="w-full py-8 mt-auto bg-zinc-950 border-t border-emerald-900/10">
+<div class="max-w-7xl mx-auto px-8 flex flex-col items-center space-y-4 text-center">
+<div class="text-emerald-400 font-semibold font-headline">GreenAI</div>
+<div class="flex gap-6">
+<a class="text-zinc-600 hover:text-emerald-300 text-xs font-body transition-colors" href="#">Models</a>
+<a class="text-zinc-600 hover:text-emerald-300 text-xs font-body transition-colors" href="#">Datasets</a>
+<a class="text-zinc-600 hover:text-emerald-300 text-xs font-body transition-colors" href="#">Compression Techniques</a>
+</div>
+<p class="text-[0.65rem] text-zinc-700 font-technical uppercase tracking-widest">GreenAI Project Context 2025</p>
+</div>
+</footer>
+</main>
+<!-- Mobile Nav Bar (Authority: JSON) -->
+<nav class="md:hidden fixed bottom-0 left-0 right-0 glass-panel border-t border-emerald-900/20 px-6 py-3 flex justify-around items-center z-50">
+<a class="flex flex-col items-center gap-1 text-emerald-400" href="#">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+<span class="text-[10px] font-bold">Dashboard</span>
+</a>
+<a class="flex flex-col items-center gap-1 text-zinc-500" href="#">
+<span class="material-symbols-outlined" data-icon="compare_arrows">compare_arrows</span>
+<span class="text-[10px] font-bold">Compare</span>
+</a>
+<a class="flex flex-col items-center gap-1 text-zinc-500" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+<span class="text-[10px] font-bold">Config</span>
+</a>
+</nav>
+</body></html>

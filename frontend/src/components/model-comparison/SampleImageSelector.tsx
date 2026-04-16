@@ -19,45 +19,37 @@ export default function SampleImageSelector({
 }: SampleImageSelectorProps) {
 	if (!samples.length) {
 		return (
-			<div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-500">
+			<div className="bg-surface-container-low rounded-xl p-4 text-sm text-on-surface-variant">
 				No sample images available.
 			</div>
 		);
 	}
 
 	return (
-		<div className="rounded-lg border border-gray-200 bg-white p-3">
-			<div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-				{samples.map((sample) => {
-					const key = sampleKey(sample);
-					const active = selectedPath === (sample.source_path || '');
+		<div className="grid grid-cols-4 sm:grid-cols-6 gap-3">
+			{samples.map((sample) => {
+				const key = sampleKey(sample);
+				const active = selectedPath === (sample.source_path || '');
 
-					return (
-						<button
-							key={key}
-							type="button"
-							onClick={() => onSelect(sample)}
-							className={[
-								'rounded-md border bg-white p-2 text-left transition-colors',
-								active
-									? 'border-green-500 ring-2 ring-green-200'
-									: 'border-gray-200 hover:border-green-300',
-							].join(' ')}
-						>
-							<div className="aspect-square overflow-hidden rounded border border-gray-100 bg-gray-50">
-								<img
-									src={sample.image_data_url}
-									alt={sample.label}
-									className="h-full w-full object-cover"
-								/>
-							</div>
-							<p className="mt-2 text-xs font-medium text-gray-700 truncate" title={sample.label}>
-								{sample.label}
-							</p>
-						</button>
-					);
-				})}
-			</div>
+				return (
+					<button
+						key={key}
+						type="button"
+						onClick={() => onSelect(sample)}
+						className={`aspect-square rounded-lg overflow-hidden transition-all cursor-pointer ${
+							active
+								? 'ring-2 ring-primary ring-offset-4 ring-offset-surface-container opacity-100'
+								: 'opacity-60 hover:opacity-100'
+						}`}
+					>
+						<img
+							src={sample.image_data_url}
+							alt={sample.label}
+							className="w-full h-full object-cover"
+						/>
+					</button>
+				);
+			})}
 		</div>
 	);
 }

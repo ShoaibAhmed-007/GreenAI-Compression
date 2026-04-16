@@ -2847,13 +2847,10 @@ def run_script(script_name, task_key):
             cwd=BACKEND_DIR,
             capture_output=True,
             text=True,
-            timeout=3600,  # 1 hour max
         )
         if result.returncode != 0:
             task_status[task_key]["error"] = result.stderr[-500:]
         task_status[task_key]["last_run"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    except subprocess.TimeoutExpired:
-        task_status[task_key]["error"] = "Script timed out (1 hour limit)"
     except Exception as e:
         task_status[task_key]["error"] = str(e)
     finally:
@@ -3009,7 +3006,21 @@ async def compress_preloaded(req: PreloadedCompressRequest):
 
     def _run_in_thread():
         try:
+            import torch as _torch
             from compress import run_compression
+
+            # Explicitly pick the best available device so GPU is always used
+            # when CUDA is present — never rely on the default fallback inside run_compression.
+            _device = _torch.device('cuda' if _torch.cuda.is_available() else 'cpu')
+            _device_label = (
+                f"CUDA ({_torch.cuda.get_device_name(_device)})"
+                if _device.type == 'cuda'
+                else 'CPU'
+            )
+
+            # Surface device info in the very first status update
+            preloaded_task["detail"] = f"Loading {req.model_name} on {_device_label}..."
+            preloaded_task["progress"] = preloaded_task["detail"]
 
             def progress_cb(step, detail=''):
                 preloaded_task["step"] = step
@@ -3021,6 +3032,7 @@ async def compress_preloaded(req: PreloadedCompressRequest):
                 method=method,
                 dataset=dataset,
                 fine_tune_epochs=req.fine_tune_epochs,
+                device=_device,
                 progress_cb=progress_cb,
             )
 

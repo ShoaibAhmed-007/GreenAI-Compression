@@ -38,18 +38,12 @@ WEIGHTS_DIR = os.path.join(os.path.dirname(__file__), '..', 'models', 'pretraine
 
 
 def prepare_single_model(model_key, dataset='CIFAR10', device=None, save_weights=True,
-                         train_loader=None, test_loader=None, timeout_sec=300):
+                         train_loader=None, test_loader=None):
     """
     Download, fine-tune, evaluate and save baseline metrics for a single model.
     Returns dict with all baseline metrics.
-    timeout_sec: max seconds per model (default 300 = 5 min). Raises TimeoutError if exceeded.
     """
     model_start = time.time()
-
-    def _check_timeout(step_name):
-        elapsed = time.time() - model_start
-        if elapsed > timeout_sec:
-            raise TimeoutError(f"Model {model_key} exceeded {timeout_sec}s timeout at {step_name} ({elapsed:.0f}s elapsed)")
 
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -85,7 +79,6 @@ def prepare_single_model(model_key, dataset='CIFAR10', device=None, save_weights
     model = model.to(device)
     download_time = time.time() - t0
     print(f"         Done in {download_time:.1f}s", flush=True)
-    _check_timeout('download')
 
     # 2. Prepare data (reuse if provided)
     if train_loader is None or test_loader is None:
@@ -120,7 +113,6 @@ def prepare_single_model(model_key, dataset='CIFAR10', device=None, save_weights
             batch_count += 1
             if batch_count % 25 == 0:
                 print(f"         Epoch {ep+1}/{head_epochs} — batch {batch_count}/{max_head_batches} ({time.time()-model_start:.0f}s)", flush=True)
-        _check_timeout(f'head-tune epoch {ep+1}')
 
     # 4. (Skipped) Full fine-tune is too slow for 224×224 pretrained models.
     #    Head-only tune gives good-enough baselines for compression comparison.
@@ -237,8 +229,7 @@ def prepare_all_models(dataset='CIFAR10', model_keys=None, device=None):
 
             tl, tel = shared_loaders[isz]
             result = prepare_single_model(key, dataset=dataset, device=device,
-                                          train_loader=tl, test_loader=tel,
-                                          timeout_sec=300)
+                                          train_loader=tl, test_loader=tel)
             results[key] = result
 
             # Save incrementally (in case of crash)

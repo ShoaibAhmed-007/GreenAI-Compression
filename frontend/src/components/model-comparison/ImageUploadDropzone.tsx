@@ -57,15 +57,15 @@ export default function ImageUploadDropzone({
           const file = e.dataTransfer.files?.[0] || null;
           handleFile(file);
         }}
-        className={[
-          'rounded-lg border-2 border-dashed p-5 text-center transition-colors',
+        className={`rounded-xl border-2 border-dashed p-8 text-center transition-all ${
           dragActive
-            ? 'border-green-500 bg-green-50'
-            : 'border-gray-300 bg-white hover:border-green-400',
-        ].join(' ')}
+            ? 'border-primary bg-primary/5'
+            : 'border-outline-variant/30 bg-surface-container-low hover:border-primary/30'
+        }`}
       >
-        <p className="text-sm font-medium text-gray-800">Drag and drop image here</p>
-        <p className="text-xs text-gray-500 mt-1">or</p>
+        <span className="material-symbols-outlined text-3xl text-on-surface-variant/40 mb-2">cloud_upload</span>
+        <p className="text-sm font-medium text-on-surface">Drag and drop image here</p>
+        <p className="text-xs text-on-surface-variant/50 mt-1">or</p>
         <button
           type="button"
           className="mt-3 btn-secondary"
@@ -80,19 +80,19 @@ export default function ImageUploadDropzone({
           className="hidden"
           onChange={(e) => handleFile(e.target.files?.[0] || null)}
         />
-        <p className="text-xs text-gray-500 mt-2">
+        <p className="text-xs text-on-surface-variant/40 mt-3">
           Accepted formats: JPG, PNG, WEBP, BMP
         </p>
       </div>
 
       {fileName && (
-        <p className="text-sm text-gray-700">
-          Selected file: <span className="font-semibold">{fileName}</span>
+        <p className="text-sm text-on-surface">
+          Selected file: <span className="font-semibold font-technical text-primary">{fileName}</span>
         </p>
       )}
 
       {localError && (
-        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div className="rounded-lg bg-error-container/10 px-3 py-2 text-sm text-on-error-container ghost-border">
           {localError}
         </div>
       )}

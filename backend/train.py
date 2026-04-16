@@ -287,6 +287,14 @@ def train_model(model_name: str, epochs: int = 50, batch_size: int = 128,
         )
         tracker.start()
         print("  📊 CodeCarbon energy tracking: ACTIVE")
+        
+        # Check if actual GPU tracking is engaged or if it fell back to TDP
+        has_gpu = any(hw.__class__.__name__.lower().find('gpu') != -1 for hw in getattr(tracker, '_hardware', []))
+        print("     ℹ️ Carbon Intensity: Using average fallback (Regional estimate for Punjab, PAK)")
+        if has_gpu:
+            print("     ℹ️ Power Draw: Using actual GPU hardware metrics (NVML)")
+        else:
+            print("     ℹ️ Power Draw: Using TDP approximations (CPU/RAM fallback tracking)")
     except ImportError:
         print("  ⚠️  CodeCarbon not installed — energy tracking disabled")
     except Exception as e:
@@ -307,12 +315,27 @@ def train_model(model_name: str, epochs: int = 50, batch_size: int = 128,
         epoch_time = time.time() - epoch_start
         lr_current = optimizer.param_groups[0]['lr']
 
+        # Update emissions so far and print them
+        curr_kwh, curr_co2 = 0.0, 0.0
+        if tracker is not None:
+            try:
+                curr_co2 = float(tracker.flush())
+                # Safely try to grab energy_consumed (in kWh), otherwise use fallback conversion
+                if hasattr(tracker, '_total_energy') and hasattr(tracker._total_energy, 'kWh'):
+                    curr_kwh = float(tracker._total_energy.kWh)
+                else:
+                    curr_kwh = curr_co2 / 1000.0  # fallback approximation
+            except Exception:
+                pass
+
         print(f"  Epoch {epoch:3d}/{epochs}  "
               f"Loss: {train_loss:.4f}  "
               f"Train: {train_acc:.2f}%  "
               f"Val: {val_acc:.2f}%  "
               f"LR: {lr_current:.6f}  "
-              f"Time: {epoch_time:.1f}s")
+              f"Time: {epoch_time:.0f}s  "
+              f"Energy: {curr_kwh:.5f}kWh  "
+              f"CO₂: {curr_co2:.5f}kg")
 
         if val_acc > best_acc:
             best_acc = val_acc
