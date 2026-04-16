@@ -77,7 +77,7 @@ function resolveCo2(result: DynamicResult | null): number | null {
 export function CompressionResults({ result }: CompressionResultsProps) {
   if (!result) {
     return (
-      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600">
+      <div className="bg-surface-container-low rounded-xl p-4 text-sm text-on-surface-variant">
         No compressed result available for the selected technique.
       </div>
     );
@@ -90,34 +90,34 @@ export function CompressionResults({ result }: CompressionResultsProps) {
 
   return (
     <div className="space-y-3">
-      <div className="rounded-lg border border-gray-200 bg-white p-3">
-        <p className="text-xs uppercase tracking-wide text-gray-500">Applied Compression Technique</p>
-        <p className="text-base font-semibold text-gray-900 mt-1">{strategyLabel(result)}</p>
+      <div className="bg-surface-container-low rounded-xl p-4">
+        <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Applied Compression Technique</p>
+        <p className="text-base font-semibold text-on-surface mt-1">{strategyLabel(result)}</p>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div className="rounded-lg border border-gray-200 bg-white p-3">
-          <p className="text-xs uppercase tracking-wide text-gray-500">Compressed Model Size</p>
-          <p className="text-lg font-bold text-gray-900 mt-1">{formatSize(size)}</p>
+        <div className="bg-surface-container-low rounded-xl p-4">
+          <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Compressed Model Size</p>
+          <p className="text-2xl font-technical font-bold text-primary mt-1">{formatSize(size)}</p>
         </div>
 
-        <div className="rounded-lg border border-gray-200 bg-white p-3">
-          <p className="text-xs uppercase tracking-wide text-gray-500">Compressed Accuracy</p>
-          <p className="text-lg font-bold text-green-700 mt-1">{formatPercent(accuracy)}</p>
+        <div className="bg-surface-container-low rounded-xl p-4">
+          <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Compressed Accuracy</p>
+          <p className="text-2xl font-technical font-bold text-secondary mt-1">{formatPercent(accuracy)}</p>
         </div>
 
-        <div className="rounded-lg border border-gray-200 bg-white p-3">
-          <p className="text-xs uppercase tracking-wide text-gray-500">Compressed Latency</p>
-          <p className="text-lg font-bold text-blue-700 mt-1">{formatMs(latency)}</p>
+        <div className="bg-surface-container-low rounded-xl p-4">
+          <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Compressed Latency</p>
+          <p className="text-2xl font-technical font-bold text-tertiary mt-1">{formatMs(latency)}</p>
         </div>
 
-        <div className="rounded-lg border border-gray-200 bg-white p-3">
-          <p className="text-xs uppercase tracking-wide text-gray-500">Compressed CO2 Emissions</p>
-          <p className="text-lg font-bold text-emerald-700 mt-1">{formatCo2(co2)}</p>
+        <div className="bg-surface-container-low rounded-xl p-4">
+          <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Compressed CO2 Emissions</p>
+          <p className="text-2xl font-technical font-bold text-on-surface mt-1">{formatCo2(co2)}</p>
         </div>
       </div>
 
-      <p className="text-xs text-gray-500">
+      <p className="text-xs text-on-surface-variant/50">
         Compression Results section intentionally shows compressed metrics only.
       </p>
     </div>

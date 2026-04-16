@@ -2413,9 +2413,15 @@ def run_compression(model_name, method, dataset='CIFAR10',
 
     _cb = progress_cb or (lambda step, detail='': None)
 
+    device_label = str(device)
+    if device.type == 'cuda' and torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(device)
+        device_label = f"CUDA ({gpu_name})"
+
     print(f"\n{'='*60}")
     print(f"Preloaded Compression: {cfg['name']} + {method.upper()}")
     print(f"Dataset: {dataset} | Input: {input_size}x{input_size} | Classes: {num_classes}")
+    print(f"Device: {device_label}")
     print(f"{'='*60}")
 
     # Step 1: Load model — try pre-saved baseline first
@@ -2424,7 +2430,7 @@ def run_compression(model_name, method, dataset='CIFAR10',
         f'{model_key}_baseline.pth')
     has_pretrained = os.path.exists(pretrained_path)
 
-    _cb('loading_model', f'Loading {cfg["name"]}...')
+    _cb('loading_model', f'Loading {cfg["name"]} on {device_label}...')
     model = get_pretrained_model(model_key, num_classes=num_classes)
     model = model.to(device)
 

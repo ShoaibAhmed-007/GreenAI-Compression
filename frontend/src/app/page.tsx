@@ -132,9 +132,9 @@ export default function Home() {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="text-center">
-          <div className="w-12 h-12 border-4 border-green-200 border-t-green-600 rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-gray-500">Loading dashboard...</p>
-          <p className="text-xs text-gray-400 mt-1">
+          <div className="w-12 h-12 border-4 border-primary/20 border-t-primary rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-on-surface-variant">Loading dashboard...</p>
+          <p className="text-xs text-on-surface-variant/50 mt-1">
             Make sure the FastAPI server is running on port 8000
           </p>
         </div>
@@ -146,15 +146,15 @@ export default function Home() {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="card max-w-md text-center">
-          <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <span className="text-red-600 text-xl">!</span>
+          <div className="w-12 h-12 bg-error-container/20 rounded-full flex items-center justify-center mx-auto mb-4">
+            <span className="material-symbols-outlined text-error">error</span>
           </div>
-          <h2 className="text-lg font-semibold text-gray-900 mb-2">
+          <h2 className="text-lg font-headline font-semibold text-on-surface mb-2">
             Cannot Connect to API
           </h2>
-          <p className="text-sm text-gray-500 mb-4">{error}</p>
-          <div className="bg-gray-50 rounded-lg p-3 text-left">
-            <p className="text-xs text-gray-600 font-mono">
+          <p className="text-sm text-on-surface-variant mb-4">{error}</p>
+          <div className="bg-surface-container-low rounded-xl p-3 text-left">
+            <p className="text-xs text-on-surface-variant font-technical">
               cd backend<br />
               python main.py
             </p>
@@ -236,11 +236,62 @@ export default function Home() {
     ? [...readyBaselineModels].sort((a, b) => (a.size_MB || 0) - (b.size_MB || 0))[0]
     : null;
 
+  // Best baseline accuracy — highest accuracy among all ready models (dynamic)
+  const readyAccuracyModels = Object.values(baselines?.models || {}).filter(
+    (m) => m.status === 'ready' && typeof m.accuracy === 'number' && m.accuracy != null
+  );
+  const bestBaselineModel = readyAccuracyModels.length > 0
+    ? [...readyAccuracyModels].sort((a, b) => (b.accuracy || 0) - (a.accuracy || 0))[0]
+    : null;
+  const bestBaselineStrategy = bestBaselineModel
+    ? {
+        key: 'baseline',
+        name: bestBaselineModel.model_name,
+        accuracy: bestBaselineModel.accuracy || 0,
+        size_MB: bestBaselineModel.size_MB || 0,
+        size_reduction: 0,
+        params: bestBaselineModel.total_params || 0,
+      } as import('@/lib/api').Strategy
+    : undefined;
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-10">
+      {/* Dashboard Header & Actions */}
+      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
+        <div>
+          <h2 className="text-4xl font-headline font-bold text-on-surface tracking-tight">
+            System Overview
+          </h2>
+          <p className="text-on-surface-variant mt-2 max-w-xl">
+            Monitor your machine learning efficiency metrics and coordinate model compression pipelines for sustainable edge deployment.
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={handleResetSessionResults}
+            disabled={savedResults.length === 0}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium text-sm transition-all ${
+              savedResults.length === 0
+                ? 'bg-surface-container-high text-on-surface-variant/40 cursor-not-allowed'
+                : 'bg-surface-container-high text-on-surface-variant hover:bg-surface-container-highest hover:text-on-surface'
+            }`}
+          >
+            <span className="material-symbols-outlined text-lg">delete_sweep</span>
+            Clear History
+          </button>
+          <Link
+            href="/model-comparison"
+            className="btn-primary flex items-center gap-2"
+          >
+            <span className="material-symbols-outlined text-lg">analytics</span>
+            Compare Models on Images
+          </Link>
+        </div>
+      </div>
+
       {/* Top Stats */}
       <StatsCards
-        baseline={undefined}
+        baseline={bestBaselineStrategy}
         bestStrategy={bestStrategy}
         smallestModelName={smallestBaselineModel?.model_name}
         smallestModelSizeMB={smallestBaselineModel?.size_MB}
@@ -248,26 +299,6 @@ export default function Home() {
         totalModels={totalCount}
         dynamicCount={savedResults.length}
       />
-
-      <div className="flex flex-wrap justify-end gap-2">
-        <Link
-          href="/model-comparison"
-          className="btn-primary"
-        >
-          Compare Models on Images
-        </Link>
-        <button
-          onClick={handleResetSessionResults}
-          disabled={savedResults.length === 0}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors border ${
-            savedResults.length === 0
-              ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
-              : 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
-          }`}
-        >
-          Clear History
-        </button>
-      </div>
 
       {/* Prepare Panel */}
       {baselines && (
@@ -278,51 +309,58 @@ export default function Home() {
         />
       )}
 
-      {/* Model Grid */}
-      {baselines && (
-        <ModelSelector
-          models={baselines.models}
-          selectedModel={selectedModel}
-          onSelectModel={(key) => {
-            setSelectedModel(key);
-            setCompressionDialogOpen(true);
-          }}
-          compressionCounts={compressionCounts}
-        />
-      )}
+      {/* Model Grid + Analysis Sidebar */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+        {/* Model Library Grid (2/3 width) */}
+        <div className="xl:col-span-2 space-y-6">
+          {baselines && (
+            <ModelSelector
+              models={baselines.models}
+              selectedModel={selectedModel}
+              onSelectModel={(key) => {
+                setSelectedModel(key);
+                setCompressionDialogOpen(true);
+              }}
+              compressionCounts={compressionCounts}
+            />
+          )}
 
-      {/* Inline Expanded Model Details */}
-      {selectedModel && baselines?.models[selectedModel] && (
-        <CompressionDialog
-          open={isCompressionDialogOpen}
-          modelKey={selectedModel}
-          model={baselines.models[selectedModel]}
-          onClose={() => setCompressionDialogOpen(false)}
-          onNewResult={handleNewResult}
-        />
-      )}
+          {/* Inline Expanded Model Details */}
+          {selectedModel && baselines?.models[selectedModel] && (
+            <CompressionDialog
+              open={isCompressionDialogOpen}
+              modelKey={selectedModel}
+              model={baselines.models[selectedModel]}
+              onClose={() => setCompressionDialogOpen(false)}
+              onNewResult={handleNewResult}
+            />
+          )}
+        </div>
 
-      {/* Compression Analysis (selected model only) + Strategy Comparison (all results) */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <CompressionChart
-          strategies={chartStrategies}
-          modelName={selectedModel && baselines?.models[selectedModel]
-            ? baselines.models[selectedModel].model_name
-            : undefined}
-        />
-        <ComparisonTable
-          strategies={allStrategies}
-          onDeleteStrategy={handleDeleteResult}
-        />
+        {/* Analysis Sidebar (1/3 width) */}
+        <div className="space-y-8">
+          {/* Energy */}
+          <EnergySection
+            energy={data.energy || {}}
+            savedResults={savedResults}
+            baselines={baselines?.models || {}}
+            onDeleteResult={handleDeleteResult}
+          />
+
+          {/* Compression Analysis + Strategy Comparison */}
+          <CompressionChart
+            strategies={chartStrategies}
+            modelName={selectedModel && baselines?.models[selectedModel]
+              ? baselines.models[selectedModel].model_name
+              : undefined}
+          />
+
+          <ComparisonTable
+            strategies={allStrategies}
+            onDeleteStrategy={handleDeleteResult}
+          />
+        </div>
       </div>
-
-      {/* Energy */}
-      <EnergySection
-        energy={data.energy || {}}
-        savedResults={savedResults}
-        baselines={baselines?.models || {}}
-        onDeleteResult={handleDeleteResult}
-      />
     </div>
   );
 }

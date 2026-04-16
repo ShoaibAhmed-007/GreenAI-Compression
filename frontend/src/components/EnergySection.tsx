@@ -92,34 +92,32 @@ export function EnergySection({
   const showSection = hasSavings || hasComparisons;
 
   return (
-    <div className="card">
-      <div className="flex items-center gap-2 mb-4">
-        <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center">
-          <span className="text-green-600 text-sm">⚡</span>
-        </div>
+    <div className="bg-surface-container p-6 rounded-2xl space-y-6">
+      <div className="flex items-center gap-3">
+        <span className="material-symbols-outlined text-secondary">energy_savings_leaf</span>
         <div>
-          <h3 className="text-lg font-semibold text-gray-900">
-            Energy & Carbon Emissions
+          <h3 className="text-lg font-headline font-semibold text-on-surface">
+            Sustainability Impact
           </h3>
-          <p className="text-xs text-gray-500">Phase 7 — CodeCarbon tracking</p>
+          <p className="text-xs text-on-surface-variant/60">Phase 7 — CodeCarbon tracking</p>
         </div>
       </div>
 
       {!showSection ? (
-        <div className="bg-gray-50 rounded-lg p-6 text-center">
-          <p className="text-sm text-gray-500 mb-2">
+        <div className="bg-surface-container-low rounded-xl p-6 text-center">
+          <p className="text-sm text-on-surface-variant mb-2">
             No energy data available yet.
           </p>
-          <p className="text-xs text-gray-400">
+          <p className="text-xs text-on-surface-variant/50">
             Run energy tracking from the Actions panel or compress a model.
           </p>
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-4">
           {/* Baseline vs compressed CO2 */}
           {hasComparisons && (
             <>
-              <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+              <p className="text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
                 Baseline vs Compressed CO2
               </p>
               {comparisonRows.map((row) => {
@@ -130,63 +128,66 @@ export function EnergySection({
 
                 const reductionTone =
                   row.reductionPercent == null
-                    ? 'text-gray-500'
+                    ? 'text-on-surface-variant'
                     : row.reductionPercent > 0
-                      ? 'text-green-600'
+                      ? 'text-primary'
                       : row.reductionPercent < 0
-                        ? 'text-red-600'
-                        : 'text-gray-600';
+                        ? 'text-error'
+                        : 'text-on-surface-variant';
 
                 return (
-                  <div key={row.key} className="bg-gray-50 rounded-lg p-4 border border-gray-100">
-                    <div className="flex items-start justify-between gap-3 mb-3">
-                      <p className="text-sm font-medium text-gray-700">{row.label}</p>
+                  <div key={row.key} className="bg-surface-container-low rounded-xl p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="text-sm font-medium text-on-surface">{row.label}</p>
                       <div className="flex items-start gap-2">
                         <div className="text-right">
-                          <p className={`text-lg font-bold ${reductionTone}`}>{reductionText}</p>
-                          <p className="text-xs text-gray-500">CO2 reduction</p>
+                          <p className={`text-lg font-bold font-technical ${reductionTone}`}>{reductionText}</p>
+                          <p className="text-xs text-on-surface-variant/50">CO2 reduction</p>
                         </div>
                         {onDeleteResult && (
                           <button
                             type="button"
                             onClick={() => onDeleteResult(row.key)}
-                            className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+                            className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-error-container/10 text-error hover:bg-error-container/20 transition-colors"
                             title="Delete this saved result"
                             aria-label="Delete this saved result"
                           >
-                            ×
+                            <span className="material-symbols-outlined text-sm">close</span>
                           </button>
                         )}
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                      <div className="rounded-lg border border-gray-200 bg-white p-3">
-                        <p className="text-[11px] uppercase tracking-wide text-gray-500">Baseline CO2</p>
-                        <p className="text-sm font-semibold text-gray-800 mt-1">{formatCo2(row.baselineCo2)}</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="bg-surface-container-lowest rounded-xl p-3" style={{ borderLeft: '4px solid #ffb4ab' }}>
+                        <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Baseline CO2</p>
+                        <p className="text-sm font-technical text-on-surface mt-1">{formatCo2(row.baselineCo2)}</p>
                       </div>
 
-                      <div className="rounded-lg border border-gray-200 bg-white p-3">
-                        <p className="text-[11px] uppercase tracking-wide text-gray-500">Compressed CO2</p>
-                        <p className="text-sm font-semibold text-gray-800 mt-1">{formatCo2(row.compressedCo2)}</p>
+                      <div className="bg-surface-container-lowest rounded-xl p-3" style={{ borderLeft: '4px solid #5bdda8' }}>
+                        <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Compressed CO2</p>
+                        <p className="text-sm font-technical text-primary mt-1">{formatCo2(row.compressedCo2)}</p>
                       </div>
 
-                      <div className="rounded-lg border border-gray-200 bg-white p-3">
-                        <p className="text-[11px] uppercase tracking-wide text-gray-500">Compressed Train / Infer</p>
-                        <p className="text-sm font-semibold text-gray-800 mt-1">
+                      <div className="bg-surface-container-lowest rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Train / Infer</p>
+                        <p className="text-sm font-technical text-on-surface mt-1">
                           {`${formatCo2(row.compressedTrainCo2)} / ${formatCo2(row.compressedInferCo2)}`}
                         </p>
                       </div>
                     </div>
 
                     <div>
-                      <p className="text-[11px] text-gray-500 mt-2">
+                      <p className="text-[10px] text-on-surface-variant/50">
                         Fair comparison prefers total benchmark CO2 when available; otherwise it falls back to train/infer fields.
                       </p>
                       {row.suspiciousReduction && (
-                        <p className="text-[11px] text-amber-700 mt-1">
-                          Warning: very high CO2 reduction with small size reduction. Re-check tracking workload parity.
-                        </p>
+                        <div className="flex items-start gap-2 mt-2 bg-error-container/10 p-2.5 rounded-lg">
+                          <span className="material-symbols-outlined text-error text-sm">warning</span>
+                          <p className="text-[10px] text-on-error-container">
+                            Warning: very high CO2 reduction with small size reduction. Re-check tracking workload parity.
+                          </p>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -199,40 +200,40 @@ export function EnergySection({
           {hasSavings && (
             <>
               {hasComparisons && (
-                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mt-4">
+                <p className="text-[10px] font-bold text-on-surface-variant uppercase tracking-widest mt-4">
                   Baseline Energy Tracking
                 </p>
               )}
               {Object.entries(energy).map(([key, data]: [string, any]) => {
                 if (key === 'training_compact_vs_baseline') {
                   return (
-                    <div key={key} className="bg-green-50 rounded-lg p-4 border border-green-100">
+                    <div key={key} className="bg-primary/10 rounded-xl p-5">
                       <div className="flex items-center justify-between">
                         <div>
-                          <p className="text-sm font-medium text-green-800">
+                          <p className="text-sm font-medium text-primary">
                             Training Energy Savings
                           </p>
-                          <p className="text-xs text-green-600 mt-0.5">
+                          <p className="text-xs text-primary/60 mt-0.5">
                             Compact Student vs ResNet18 Baseline
                           </p>
                         </div>
                         <div className="text-right">
-                          <p className="text-2xl font-bold text-green-700">
+                          <p className="text-4xl font-headline font-bold text-primary">
                             {data.energy_saving_percent}%
                           </p>
-                          <p className="text-xs text-green-600">less energy</p>
+                          <p className="text-xs text-primary/60">less energy</p>
                         </div>
                       </div>
-                      <div className="grid grid-cols-2 gap-4 mt-3 pt-3 border-t border-green-200">
+                      <div className="grid grid-cols-2 gap-4 mt-4 pt-4" style={{ borderTop: '1px solid rgba(91, 221, 168, 0.15)' }}>
                         <div>
-                          <p className="text-xs text-green-600">Baseline</p>
-                          <p className="text-sm font-mono text-green-800">
+                          <p className="text-xs text-primary/60 font-technical">Baseline</p>
+                          <p className="text-sm font-technical text-primary">
                             {formatEnergy(toFiniteNumber(data.baseline_energy_kWh))}
                           </p>
                         </div>
                         <div>
-                          <p className="text-xs text-green-600">Student</p>
-                          <p className="text-sm font-mono text-green-800">
+                          <p className="text-xs text-primary/60 font-technical">Student</p>
+                          <p className="text-sm font-technical text-primary">
                             {formatEnergy(toFiniteNumber(data.student_energy_kWh))}
                           </p>
                         </div>
@@ -242,25 +243,25 @@ export function EnergySection({
                 }
 
                 return (
-                  <div key={key} className="bg-gray-50 rounded-lg p-3 flex items-center justify-between">
+                  <div key={key} className="bg-surface-container-low rounded-xl p-4 flex items-center justify-between">
                     <div>
-                      <p className="text-sm font-medium text-gray-700">
+                      <p className="text-sm font-medium text-on-surface">
                         {key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
                       </p>
-                      <p className="text-xs text-gray-500 mt-0.5">
+                      <p className="text-xs text-on-surface-variant/60 mt-0.5 font-technical">
                         {`Energy: ${formatEnergy(toFiniteNumber(data.inference_energy_kWh))}`}
                       </p>
                     </div>
                     <div className="text-right">
-                      <span className={`text-lg font-bold ${
-                        data.energy_saving_percent > 0 ? 'text-green-600' : 'text-gray-600'
+                      <span className={`text-lg font-bold font-technical ${
+                        data.energy_saving_percent > 0 ? 'text-primary' : 'text-on-surface-variant'
                       }`}>
                         {data.energy_saving_percent !== undefined
                           ? `${data.energy_saving_percent}%`
                           : '—'}
                       </span>
                       {data.energy_saving_percent > 0 && (
-                        <p className="text-xs text-green-600">saved</p>
+                        <p className="text-xs text-primary/60">saved</p>
                       )}
                     </div>
                   </div>

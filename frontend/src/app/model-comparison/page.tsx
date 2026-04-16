@@ -194,165 +194,227 @@ export default function ModelComparisonPage() {
 
   if (initialLoading) {
     return (
-      <div className="card">
-        <div className="flex items-center justify-center min-h-[320px]">
-          <div className="text-center">
-            <div className="w-12 h-12 border-4 border-green-200 border-t-green-600 rounded-full animate-spin mx-auto mb-4" />
-            <p className="text-sm text-gray-600">Loading image comparison workspace...</p>
-          </div>
+      <div className="flex items-center justify-center min-h-[320px]">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-primary/20 border-t-primary rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-sm text-on-surface-variant">Loading image comparison workspace...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-bold text-gray-900">Compare Models on Images</h2>
-          <p className="text-sm text-gray-500 mt-1">
-            Run baseline vs compressed inference on either project sample images or your own uploaded image.
-          </p>
-        </div>
-        <Link href="/" className="btn-secondary">
-          Back to Dashboard
+    <div className="space-y-8">
+      {/* Header */}
+      <header className="mb-2">
+        <Link
+          href="/"
+          className="inline-flex items-center text-primary hover:text-primary-fixed transition-colors gap-2 mb-4 group"
+        >
+          <span className="material-symbols-outlined text-[18px] group-hover:-translate-x-1 transition-transform">arrow_back</span>
+          <span className="text-sm font-medium">Back to Dashboard</span>
         </Link>
-      </div>
+        <h1 className="text-4xl font-headline font-bold text-on-surface tracking-tight mb-2">
+          Compare Models on Images
+        </h1>
+        <p className="text-on-surface-variant font-light max-w-2xl">
+          Execute side-by-side inference testing to validate performance and accuracy of your compressed edge models against high-precision baselines.
+        </p>
+      </header>
 
       {(initialError || formError || error) && (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+        <div className="bg-error-container/10 rounded-xl p-3 text-sm text-on-error-container ghost-border">
           {initialError || formError || error}
         </div>
       )}
 
-      <div className="card space-y-4">
-        <h3 className="text-lg font-semibold text-gray-900">1. Select Models</h3>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        {/* Workflow Section (Left) */}
+        <div className="lg:col-span-8 space-y-8">
+          {/* Step 1: Select Models */}
+          <section className="bg-surface-container rounded-xl p-8">
+            <div className="flex items-center gap-4 mb-6">
+              <span className="font-technical w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-sm">01</span>
+              <h2 className="text-xl font-headline font-semibold text-on-surface">Select Models</h2>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="space-y-2">
+                <label className="text-xs font-technical text-on-surface-variant uppercase tracking-widest">Baseline Model</label>
+                <select
+                  value={baselineModelKey}
+                  onChange={(e) => setBaselineModelKey(e.target.value)}
+                  className="w-full bg-surface-container-low border-none rounded-lg text-on-surface py-3 px-4 focus:ring-2 focus:ring-primary/30 outline-none"
+                >
+                  {readyBaselineOptions.map((option) => (
+                    <option key={option.key} value={option.key}>
+                      {option.name}
+                    </option>
+                  ))}
+                </select>
+                {noReadyBaseline && (
+                  <p className="text-xs text-secondary mt-2">
+                    No ready baseline found. Prepare baseline models first.
+                  </p>
+                )}
+              </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="text-sm font-medium text-gray-700">Baseline Model</label>
-            <select
-              value={baselineModelKey}
-              onChange={(e) => setBaselineModelKey(e.target.value)}
-              className="mt-1 w-full px-3 py-2 border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-green-300 focus:border-green-400 outline-none"
+              <div className="space-y-2">
+                <label className="text-xs font-technical text-on-surface-variant uppercase tracking-widest">Compressed Model</label>
+                <select
+                  value={compressedModelKey}
+                  onChange={(e) => setCompressedModelKey(e.target.value)}
+                  className="w-full bg-surface-container-low border-none rounded-lg text-on-surface py-3 px-4 focus:ring-2 focus:ring-primary/30 outline-none"
+                >
+                  {options.compressed_models.map((option) => (
+                    <option key={option.key} value={option.key}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* TTA Toggle */}
+            <div className="mt-6 flex items-center justify-between p-4 bg-surface-container-low rounded-lg">
+              <div className="flex flex-col">
+                <span className="text-sm font-medium text-on-surface">Test-Time Augmentation (TTA)</span>
+                <span className="text-xs text-on-surface-variant">
+                  Increases accuracy by running inference on multiple transformed versions of the image.
+                </span>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={enableTTA}
+                  onChange={(e) => setEnableTTA(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-surface-variant peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary" />
+              </label>
+            </div>
+          </section>
+
+          {/* Step 2: Select Image Input */}
+          <section className="bg-surface-container rounded-xl p-8">
+            <div className="flex items-center gap-4 mb-6">
+              <span className="font-technical w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-sm">02</span>
+              <h2 className="text-xl font-headline font-semibold text-on-surface">Select Image Input</h2>
+            </div>
+            <ImageSourceTabs value={sourceMode} onChange={setSourceMode} />
+
+            <div className="mt-6">
+              {sourceMode === 'sample' ? (
+                <SampleImageSelector
+                  samples={samples}
+                  selectedPath={selectedSamplePath}
+                  onSelect={onSelectSample}
+                />
+              ) : (
+                <ImageUploadDropzone
+                  fileName={uploadedFile?.name}
+                  onFileSelected={onSelectUpload}
+                />
+              )}
+            </div>
+          </section>
+
+          {/* Step 3: Preview and Run */}
+          <section className="bg-surface-container rounded-xl p-8 relative overflow-hidden">
+            <div className="absolute top-4 right-4">
+              <div className="flex items-center gap-2 bg-primary/20 text-primary px-3 py-1 rounded-full text-xs font-technical">
+                <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+                READY
+              </div>
+            </div>
+            <div className="flex items-center gap-4 mb-6">
+              <span className="font-technical w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-sm">03</span>
+              <h2 className="text-xl font-headline font-semibold text-on-surface">Preview and Run</h2>
+            </div>
+
+            <div className="mb-6">
+              <SelectedImagePreview
+                imageUrl={selectedPreviewUrl}
+                sourceLabel={selectedSourceLabel}
+                sourcePath={selectedSourcePath}
+              />
+            </div>
+
+            <button
+              type="button"
+              onClick={runCompareAction}
+              disabled={loading || noReadyBaseline || options.compressed_models.length === 0}
+              className={`w-full py-4 bg-gradient-to-r from-primary to-primary-container text-on-primary font-bold text-lg rounded-xl flex items-center justify-center gap-3 hover:shadow-lg transition-all active:scale-95 ${
+                loading ? 'opacity-70 cursor-not-allowed' : ''
+              }`}
             >
-              {readyBaselineOptions.map((option) => (
-                <option key={option.key} value={option.key}>
-                  {option.name}
-                </option>
-              ))}
-            </select>
-            {noReadyBaseline && (
-              <p className="text-xs text-amber-700 mt-2">
-                No ready baseline found. Prepare baseline models first.
-              </p>
-            )}
-          </div>
-
-          <div>
-            <label className="text-sm font-medium text-gray-700">Compressed Model</label>
-            <select
-              value={compressedModelKey}
-              onChange={(e) => setCompressedModelKey(e.target.value)}
-              className="mt-1 w-full px-3 py-2 border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-green-300 focus:border-green-400 outline-none"
-            >
-              {options.compressed_models.map((option) => (
-                <option key={option.key} value={option.key}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-gray-200 bg-white p-3">
-          <label className="inline-flex items-center gap-2 text-sm font-medium text-gray-700 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={enableTTA}
-              onChange={(e) => setEnableTTA(e.target.checked)}
-              className="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
-            />
-            Enable test-time augmentation (TTA)
-          </label>
-          <p className="text-xs text-gray-500 mt-1">
-            Improves stability for confusing classes (for example, cat vs dog) by averaging predictions over augmented variants.
-          </p>
-        </div>
-      </div>
-
-      <div className="card space-y-4">
-        <h3 className="text-lg font-semibold text-gray-900">2. Select Image Input</h3>
-        <ImageSourceTabs value={sourceMode} onChange={setSourceMode} />
-
-        {sourceMode === 'sample' ? (
-          <SampleImageSelector
-            samples={samples}
-            selectedPath={selectedSamplePath}
-            onSelect={onSelectSample}
-          />
-        ) : (
-          <ImageUploadDropzone
-            fileName={uploadedFile?.name}
-            onFileSelected={onSelectUpload}
-          />
-        )}
-      </div>
-
-      <div className="card space-y-4">
-        <h3 className="text-lg font-semibold text-gray-900">3. Preview and Run Inference</h3>
-
-        <SelectedImagePreview
-          imageUrl={selectedPreviewUrl}
-          sourceLabel={selectedSourceLabel}
-          sourcePath={selectedSourcePath}
-        />
-
-        <div className="flex items-center justify-end">
-          <button
-            type="button"
-            onClick={runCompareAction}
-            disabled={loading || noReadyBaseline || options.compressed_models.length === 0}
-            className={`btn-primary ${loading ? 'opacity-70 cursor-not-allowed' : ''}`}
-          >
-            {loading ? 'Running Inference...' : 'Compare Image'}
-          </button>
-        </div>
-      </div>
-
-      {result && <PredictionComparisonResults result={result} />}
-
-      {history.length > 0 && (
-        <div className="card space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-lg font-semibold text-gray-900">Comparison History</h3>
-            <button type="button" className="btn-secondary" onClick={clearHistory}>
-              Clear History
+              <span className="material-symbols-outlined">bolt</span>
+              {loading ? 'Running Inference...' : 'Run Comparison'}
             </button>
-          </div>
+          </section>
 
-          <div className="space-y-2">
-            {history.slice(0, 8).map((entry) => (
-              <button
-                key={entry.id}
-                type="button"
-                onClick={() => useHistoryResult(entry)}
-                className="w-full text-left rounded-lg border border-gray-200 bg-white p-3 hover:border-green-300"
-              >
-                <p className="text-sm font-medium text-gray-900">
-                  Baseline: <span className="capitalize">{entry.result.baseline.class}</span>{' '}
-                  ({entry.result.baseline.confidence.toFixed(2)}%) | Compressed:{' '}
-                  <span className="capitalize">{entry.result.compressed.class}</span>{' '}
-                  ({entry.result.compressed.confidence.toFixed(2)}%)
-                </p>
-                <p className="text-xs text-gray-500 mt-1">
-                  {new Date(entry.createdAt).toLocaleString()} | Source: {entry.result.input.source}
-                </p>
-              </button>
-            ))}
-          </div>
+          {/* Results */}
+          {result && <PredictionComparisonResults result={result} />}
         </div>
-      )}
+
+        {/* Sidebar: Comparison History */}
+        <aside className="lg:col-span-4 space-y-6">
+          <div className="bg-surface-container rounded-xl p-6 h-fit sticky top-24">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-lg font-headline font-bold text-on-surface">Recent Runs</h3>
+              {history.length > 0 && (
+                <button
+                  type="button"
+                  className="text-xs font-technical text-error hover:underline transition-all"
+                  onClick={clearHistory}
+                >
+                  Clear History
+                </button>
+              )}
+            </div>
+
+            {history.length === 0 ? (
+              <div className="text-center py-8">
+                <span className="material-symbols-outlined text-3xl text-on-surface-variant/30">history</span>
+                <p className="text-sm text-on-surface-variant/50 mt-2">No comparison runs yet</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {history.slice(0, 8).map((entry) => {
+                  const isMatch = entry.result.comparison?.prediction_match;
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      onClick={() => useHistoryResult(entry)}
+                      className="w-full text-left group"
+                    >
+                      <div className="flex gap-3 p-3 rounded-lg hover:bg-surface-container-low transition-colors ghost-border">
+                        <div className="flex flex-col justify-between py-1 min-w-0">
+                          <span className="text-sm font-bold text-on-surface truncate">
+                            <span className="capitalize">{entry.result.baseline.class}</span>
+                          </span>
+                          <span className={`text-[10px] font-technical ${isMatch ? 'text-primary' : 'text-error'}`}>
+                            {isMatch ? 'MATCH' : 'MISMATCH'} · {entry.result.baseline.confidence.toFixed(1)}% Conf
+                          </span>
+                          <span className="text-[10px] font-technical text-on-surface-variant/50">
+                            {new Date(entry.createdAt).toLocaleString()}
+                          </span>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="mt-8 pt-6 text-center" style={{ borderTop: '1px solid rgba(66, 73, 62, 0.1)' }}>
+              <p className="text-xs text-on-surface-variant/40 italic font-light">
+                &ldquo;Edge-ready compression for a sustainable digital ecosystem.&rdquo;
+              </p>
+            </div>
+          </div>
+        </aside>
+      </div>
     </div>
   );
 }

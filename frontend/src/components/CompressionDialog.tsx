@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BaselineModel,
   DynamicResult,
@@ -93,6 +93,8 @@ export function CompressionDialog({
   const [runningMethod, setRunningMethod] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState<number>(0);
+  const elapsedRef = useRef<NodeJS.Timeout | null>(null);
 
   const allTechniqueKeys = useMemo(() => TECHNIQUES.map((t) => t.key), []);
   const isReadyModel = model?.status === 'ready';
@@ -100,10 +102,29 @@ export function CompressionDialog({
 
   const wait = useCallback((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)), []);
 
-  const pollCompressionResult = useCallback(async (): Promise<DynamicResult> => {
-    const maxPolls = 800;
+  const startElapsedTimer = useCallback(() => {
+    setElapsed(0);
+    if (elapsedRef.current) clearInterval(elapsedRef.current);
+    elapsedRef.current = setInterval(() => {
+      setElapsed((s) => s + 1);
+    }, 1000);
+  }, []);
 
-    for (let attempt = 0; attempt < maxPolls; attempt += 1) {
+  const stopElapsedTimer = useCallback(() => {
+    if (elapsedRef.current) {
+      clearInterval(elapsedRef.current);
+      elapsedRef.current = null;
+    }
+    setElapsed(0);
+  }, []);
+
+  // Cleanup timer on unmount
+  useEffect(() => () => stopElapsedTimer(), [stopElapsedTimer]);
+
+  const pollCompressionResult = useCallback(async (): Promise<DynamicResult> => {
+    // No timeout — poll indefinitely until backend signals done or error.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
       const status: CompressionStatus = await getCompressionStatus();
       setRunStatus(status.detail || status.progress || null);
 
@@ -120,10 +141,12 @@ export function CompressionDialog({
         return status.result;
       }
 
+      // Backend finished but no result — wait one more cycle before giving up
+      await wait(1500);
+      const retry = await getCompressionStatus();
+      if (retry.result) return retry.result;
       throw new Error('Compression finished without a result payload.');
     }
-
-    throw new Error('Compression timed out. Please try again.');
   }, [wait]);
 
   const loadCompressionData = useCallback(async () => {
@@ -187,6 +210,7 @@ export function CompressionDialog({
       setRunStatus('Starting compression...');
       setRunningMode('single');
       setRunningMethod(selectedTechnique);
+      startElapsedTimer();
 
       await compressPreloaded(modelKey, selectedTechnique, model.dataset || 'CIFAR10', 5);
       const result = await pollCompressionResult();
@@ -197,10 +221,11 @@ export function CompressionDialog({
     } catch (err: any) {
       setRunError(err?.message || 'Compression failed.');
     } finally {
+      stopElapsedTimer();
       setRunningMode(null);
       setRunningMethod(null);
     }
-  }, [isReadyModel, isRunning, loadCompressionData, model, modelKey, onNewResult, pollCompressionResult, selectedTechnique]);
+  }, [isReadyModel, isRunning, loadCompressionData, model, modelKey, onNewResult, pollCompressionResult, selectedTechnique, startElapsedTimer, stopElapsedTimer]);
 
   const handleCompressAll = useCallback(async () => {
     if (!modelKey || !model || !isReadyModel || isRunning) return;
@@ -208,6 +233,7 @@ export function CompressionDialog({
     try {
       setRunError(null);
       setRunningMode('all');
+      startElapsedTimer();
 
       for (const technique of allTechniqueKeys) {
         setRunningMethod(technique);
@@ -223,10 +249,11 @@ export function CompressionDialog({
     } catch (err: any) {
       setRunError(err?.message || 'Compress-by-all failed.');
     } finally {
+      stopElapsedTimer();
       setRunningMode(null);
       setRunningMethod(null);
     }
-  }, [allTechniqueKeys, isReadyModel, isRunning, loadCompressionData, model, modelKey, onNewResult, pollCompressionResult]);
+  }, [allTechniqueKeys, isReadyModel, isRunning, loadCompressionData, model, modelKey, onNewResult, pollCompressionResult, startElapsedTimer, stopElapsedTimer]);
 
   if (!modelKey || !model) return null;
 
@@ -237,45 +264,46 @@ export function CompressionDialog({
       }`}
       aria-hidden={!open}
     >
-      <div className="mx-auto w-full max-w-5xl rounded-2xl border border-gray-200 bg-white shadow-lg">
-        <div className="sticky top-0 z-10 bg-white/95 backdrop-blur border-b border-gray-200 px-5 py-4 flex items-center justify-between">
+      <div className="bg-surface-container rounded-2xl overflow-hidden ghost-border ring-1 ring-primary/10">
+        {/* Header */}
+        <div className="sticky top-0 z-10 bg-surface-container/95 backdrop-blur px-6 py-4 flex items-center justify-between" style={{ borderBottom: '1px solid rgba(66, 73, 62, 0.15)' }}>
           <div>
-            <h3 className="text-lg font-semibold text-gray-900">{model.model_name} Details</h3>
-            <p className="text-xs text-gray-500 mt-0.5">Model key: {modelKey}</p>
+            <h3 className="text-lg font-headline font-semibold text-on-surface">{model.model_name} Details</h3>
+            <p className="text-xs text-on-surface-variant/60 mt-0.5 font-technical">Model key: {modelKey}</p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-2 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700"
+            className="p-2 rounded-lg hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface transition-colors"
             aria-label="Collapse model details"
           >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <span className="material-symbols-outlined">keyboard_arrow_up</span>
           </button>
         </div>
 
-        <div className="p-5 space-y-5">
+        <div className="p-6 space-y-6">
+          {/* Baseline Details */}
           <section className="space-y-3">
-            <h4 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Baseline Inference Details</h4>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <div className="rounded-lg border border-gray-200 bg-white p-3">
-                <p className="text-[11px] uppercase tracking-wide text-gray-500">Accuracy</p>
-                <p className="text-sm font-semibold text-gray-900 mt-1">{formatPercent(model.accuracy)}</p>
+            <h4 className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">Baseline Inference Details</h4>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="bg-surface-container-low p-4 rounded-xl">
+                <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Accuracy</p>
+                <p className="text-sm font-technical font-semibold text-on-surface mt-1">{formatPercent(model.accuracy)}</p>
               </div>
-              <div className="rounded-lg border border-gray-200 bg-white p-3">
-                <p className="text-[11px] uppercase tracking-wide text-gray-500">Size</p>
-                <p className="text-sm font-semibold text-gray-900 mt-1">{formatSize(model.size_MB)}</p>
+              <div className="bg-surface-container-low p-4 rounded-xl">
+                <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Size</p>
+                <p className="text-sm font-technical font-semibold text-on-surface mt-1">{formatSize(model.size_MB)}</p>
               </div>
-              <div className="rounded-lg border border-gray-200 bg-white p-3">
-                <p className="text-[11px] uppercase tracking-wide text-gray-500">Training CO2</p>
-                <p className="text-sm font-semibold text-emerald-700 mt-1">{formatCo2(model.training_co2_kg)}</p>
+              <div className="bg-surface-container-low p-4 rounded-xl">
+                <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Training CO2</p>
+                <p className="text-sm font-technical font-semibold text-primary mt-1">{formatCo2(model.training_co2_kg)}</p>
               </div>
             </div>
           </section>
 
+          {/* Technique Selector */}
           <section className="space-y-3">
-            <h4 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Compression Techniques</h4>
+            <h4 className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">Compression Techniques</h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
               {TECHNIQUES.map((technique) => {
                 const hasResult = Boolean(resultsByTechnique[technique.key]);
@@ -285,15 +313,19 @@ export function CompressionDialog({
                     key={technique.key}
                     type="button"
                     onClick={() => setSelectedTechnique(technique.key)}
-                    className={[
-                      'rounded-lg border px-3 py-2 text-left transition-colors',
+                    className={`rounded-xl p-3 text-left transition-all ${
                       isActive
-                        ? 'border-green-500 bg-green-50 text-green-900'
-                        : 'border-gray-200 bg-white hover:border-green-300',
-                    ].join(' ')}
+                        ? 'bg-primary text-on-primary'
+                        : 'bg-surface-container-low hover:bg-surface-container-high text-on-surface-variant'
+                    }`}
                   >
-                    <p className="text-sm font-semibold">{technique.label}</p>
-                    <p className={`text-xs mt-0.5 ${hasResult ? 'text-green-700' : 'text-gray-500'}`}>
+                    <div className="flex justify-between items-center">
+                      <p className="text-sm font-semibold">{technique.label}</p>
+                      {isActive && hasResult && (
+                        <span className="material-symbols-outlined text-sm" style={{ fontVariationSettings: "'FILL' 1" }}>check_circle</span>
+                      )}
+                    </div>
+                    <p className={`text-xs mt-0.5 ${isActive ? 'text-on-primary/70' : hasResult ? 'text-primary' : 'text-on-surface-variant/50'}`}>
                       {hasResult ? 'Result available' : 'No result yet'}
                     </p>
                   </button>
@@ -301,9 +333,9 @@ export function CompressionDialog({
               })}
             </div>
 
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-3">
+            <div className="bg-surface-container-low rounded-xl p-4 space-y-3">
               {!isReadyModel && (
-                <p className="text-xs text-amber-700">
+                <p className="text-xs text-secondary">
                   This model is not ready yet. Prepare baselines first, then run compression.
                 </p>
               )}
@@ -332,28 +364,43 @@ export function CompressionDialog({
                 </button>
               </div>
 
-              {runStatus && (
-                <p className="text-xs text-gray-600">{runStatus}</p>
+              {(runStatus || (isRunning && elapsed > 0)) && (
+                <div className="flex items-center gap-3">
+                  {isRunning && (
+                    <div className="w-3.5 h-3.5 border-2 border-primary/30 border-t-primary rounded-full animate-spin flex-shrink-0" />
+                  )}
+                  <div className="min-w-0">
+                    {runStatus && (
+                      <p className="text-xs text-on-surface-variant font-technical">{runStatus}</p>
+                    )}
+                    {isRunning && elapsed > 0 && (
+                      <p className="text-[10px] text-on-surface-variant/50 font-technical mt-0.5">
+                        Elapsed: {Math.floor(elapsed / 60)}m {elapsed % 60}s — this may take several minutes, please wait
+                      </p>
+                    )}
+                  </div>
+                </div>
               )}
 
               {runError && (
-                <p className="text-xs text-red-600">{runError}</p>
+                <p className="text-xs text-error">{runError}</p>
               )}
             </div>
           </section>
 
+          {/* Results */}
           <section className="space-y-3">
-            <h4 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Compression Results</h4>
+            <h4 className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">Compression Results</h4>
 
             {loading && (
-              <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 flex items-center gap-3">
-                <div className="w-5 h-5 border-2 border-green-200 border-t-green-600 rounded-full animate-spin" />
-                <p className="text-sm text-gray-700">Loading compressed model results...</p>
+              <div className="bg-surface-container-low rounded-xl p-4 flex items-center gap-3">
+                <div className="w-5 h-5 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+                <p className="text-sm text-on-surface-variant">Loading compressed model results...</p>
               </div>
             )}
 
             {!loading && error && (
-              <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              <div className="bg-error-container/10 rounded-xl p-3 text-sm text-on-error-container ghost-border">
                 {error}
               </div>
             )}

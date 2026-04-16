@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&amp;family=Plus+Jakarta+Sans:wght@300;400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "surface-variant": "#333532",
+                        "surface-container-highest": "#333532",
+                        "secondary-fixed": "#cbedb4",
+                        "on-tertiary-fixed-variant": "#065043",
+                        "surface": "#121411",
+                        "surface-container": "#1e201d",
+                        "surface-dim": "#121411",
+                        "on-error-container": "#ffdad6",
+                        "on-primary-fixed": "#002114",
+                        "primary": "#5bdda8",
+                        "on-tertiary-fixed": "#00201a",
+                        "on-primary-fixed-variant": "#005138",
+                        "outline": "#8c9387",
+                        "primary-fixed": "#7afac3",
+                        "error": "#ffb4ab",
+                        "inverse-on-surface": "#2f312e",
+                        "tertiary-fixed-dim": "#94d3c1",
+                        "tertiary-container": "#175a4c",
+                        "inverse-primary": "#006c4b",
+                        "background": "#121411",
+                        "error-container": "#93000a",
+                        "outline-variant": "#42493e",
+                        "surface-container-high": "#292b27",
+                        "on-secondary-fixed-variant": "#324e24",
+                        "on-secondary": "#1c3710",
+                        "primary-fixed-dim": "#5bdda8",
+                        "on-primary": "#003826",
+                        "surface-container-lowest": "#0d0f0c",
+                        "secondary-container": "#324e24",
+                        "inverse-surface": "#e3e3de",
+                        "surface-container-low": "#1a1c19",
+                        "primary-container": "#005c40",
+                        "on-error": "#690005",
+                        "tertiary": "#94d3c1",
+                        "on-surface-variant": "#c2c9bb",
+                        "secondary": "#afd09a",
+                        "on-primary-container": "#57d9a5",
+                        "on-secondary-container": "#9ebf8a",
+                        "on-secondary-fixed": "#072100",
+                        "on-background": "#e3e3de",
+                        "on-surface": "#e3e3de",
+                        "tertiary-fixed": "#afefdd",
+                        "on-tertiary-container": "#90cfbe",
+                        "secondary-fixed-dim": "#afd09a",
+                        "surface-tint": "#5bdda8",
+                        "surface-bright": "#383a36",
+                        "on-tertiary": "#00382e"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "fontFamily": {
+                        "headline": ["Space Grotesk"],
+                        "body": ["Plus Jakarta Sans"],
+                        "label": ["Plus Jakarta Sans"]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+        h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .glass { background: rgba(51, 53, 50, 0.6); backdrop-filter: blur(12px); }
+    </style>
+</head>
+<body class="bg-surface text-on-surface min-h-screen">
+<!-- TopNavBar -->
+<nav class="fixed top-0 w-full z-50 bg-emerald-950/60 backdrop-blur-xl shadow-2xl shadow-emerald-950/50 flex justify-between items-center px-6 py-3 w-full border-none">
+<div class="flex items-center gap-8">
+<span class="text-xl font-bold tracking-tight text-emerald-500">GreenAI</span>
+<div class="hidden md:flex gap-6">
+<a class="text-emerald-100/60 hover:text-emerald-100 transition-all duration-300" href="#">API Docs</a>
+</div>
+</div>
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-900/20 text-emerald-400">
+<span class="material-symbols-outlined text-[20px]">notifications</span>
+</div>
+<img alt="User profile settings" class="w-8 h-8 rounded-full ring-2 ring-emerald-500/20" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAXaS8Wf1Nu9IcNjruP0G4LcLs6UqBzrP_9dAej2AfSY2uoZp6cm7H_OYrMDCEHEi7d2r0TV42nG1IqQSvZ9FwjS05kcuQgu_1_JY5PUT_Cryv2lyjjQE5_0O0KEdAiVaCemmC_ft8WOMdVvwXZ5lPcBXXb8Vc8w1HfFD3zT_cxTIraxCmBRyGLliYONfkssd584W3eawo6yefpVoRmLnbkktveovQQ2Wp6RfYVQtNh9O5wonD-puoAFgZY6m_egQ-mX3ixDLFralo"/>
+</div>
+</nav>
+<!-- SideNavBar (Suppressed for focused comparison view as per Shell Visibility Rules) -->
+<main class="pt-24 pb-12 px-6 max-w-7xl mx-auto">
+<!-- Header -->
+<header class="mb-10">
+<a class="inline-flex items-center text-primary hover:text-primary-fixed transition-colors gap-2 mb-4 group" href="#">
+<span class="material-symbols-outlined text-[18px] group-hover:-translate-x-1 transition-transform">arrow_back</span>
+<span class="text-sm font-medium">Back to Dashboard</span>
+</a>
+<h1 class="text-4xl font-bold tracking-tight mb-2">Compare Models on Images</h1>
+<p class="text-on-surface-variant font-light max-w-2xl">Execute side-by-side inference testing to validate performance and accuracy of your compressed edge models against high-precision baselines.</p>
+</header>
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+<!-- Workflow Section (Left) -->
+<div class="lg:col-span-8 space-y-8">
+<!-- Step 1: Select Models -->
+<section class="bg-surface-container rounded-xl p-8 transition-all duration-300">
+<div class="flex items-center gap-4 mb-6">
+<span class="mono w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold">01</span>
+<h2 class="text-xl font-semibold">Select Models</h2>
+</div>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+<div class="space-y-2">
+<label class="text-xs mono text-on-surface-variant uppercase tracking-widest">Baseline Model</label>
+<select class="w-full bg-surface-container-low border-none rounded-lg text-on-surface py-3 px-4 focus:ring-2 focus:ring-primary/30">
+<option>ResNet-50 v2 (FP32)</option>
+<option>EfficientNet-B0 (Standard)</option>
+<option>VisionTransformer-Base</option>
+</select>
+</div>
+<div class="space-y-2">
+<label class="text-xs mono text-on-surface-variant uppercase tracking-widest">Compressed Model</label>
+<select class="w-full bg-surface-container-low border-none rounded-lg text-on-surface py-3 px-4 focus:ring-2 focus:ring-primary/30">
+<option>ResNet-50-Quantized (INT8)</option>
+<option>ResNet-50-Pruned (0.7 sparsity)</option>
+<option>MobileNetV3-Small (Edge)</option>
+</select>
+</div>
+</div>
+<div class="mt-6 flex items-center justify-between p-4 bg-surface-container-low rounded-lg">
+<div class="flex flex-col">
+<span class="text-sm font-medium">Test-Time Augmentation (TTA)</span>
+<span class="text-xs text-on-surface-variant">Increases accuracy by running inference on multiple transformed versions of the image.</span>
+</div>
+<label class="relative inline-flex items-center cursor-pointer">
+<input class="sr-only peer" type="checkbox" value=""/>
+<div class="w-11 h-6 bg-surface-variant peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+</label>
+</div>
+</section>
+<!-- Step 2: Select Image Input -->
+<section class="bg-surface-container rounded-xl p-8">
+<div class="flex items-center gap-4 mb-6">
+<span class="mono w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold">02</span>
+<h2 class="text-xl font-semibold">Select Image Input</h2>
+</div>
+<!-- Tabs -->
+<div class="flex gap-1 bg-surface-container-low p-1 rounded-xl mb-6">
+<button class="flex-1 py-2 rounded-lg bg-surface-container-high text-primary font-medium text-sm">Sample Images</button>
+<button class="flex-1 py-2 rounded-lg text-on-surface-variant hover:text-on-surface font-medium text-sm transition-colors">Upload Image</button>
+</div>
+<!-- Thumbnail Grid -->
+<div class="grid grid-cols-4 sm:grid-cols-6 gap-3">
+<div class="aspect-square rounded-lg overflow-hidden ring-2 ring-primary ring-offset-4 ring-offset-surface-container cursor-pointer">
+<img class="w-full h-full object-cover" data-alt="close-up of vibrant green forest leaves with morning dew and soft natural lighting" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDgV7ug6Zp08CtFLXaf7GclVCtERmfqCiVIuGtw4Fs9vu0uZJ6hW3kLTWYHy1eiI8pwSsCJYbqJlAkXfGceoGcZs_mru-e0W6rusTft-1cDVo0KXvOofH-gE9lzK7k2BewroS-FmpGOS06ybWQDndxXyMf4KR231hOXCvrgQ8svN20FrYkJgQ-Usmh1r0S3k4fwaZ2A3hfOCCAWqQS7_ggqlKV2bbV40kjAih7d79FkvQ56jN12qHdQU3GLF210H2jZfDJM1kcfiIk"/>
+</div>
+<div class="aspect-square rounded-lg overflow-hidden opacity-60 hover:opacity-100 transition-opacity cursor-pointer">
+<img class="w-full h-full object-cover" data-alt="solitary oak tree in a vast golden wheat field under a clear blue sky" src="https://lh3.googleusercontent.com/aida-public/AB6AXuA75ARnZuEsFQt6xjFaVpLHfodnbUz9QGz6hlOdB5Q47ibQW-nhYob5nADuj4AlbeXgz-ILSC8xvvtZHmL__FjsGqhgcMVVtJgliUp0-PSnC7V_IybNVKpjHaCXpJGEbh8R-zerk7mlYtbiEeiRnAK02LLitfqlO9sgSVI-cFA0vy_kK1uqavsqQO6RGztgI4Og3puPR9j0c5Xr0AhTYnuf6HbnZgZNDlQKEc85DnC54mw-DgjL3pDpzKo3Yohkr0t4Fvhr0adREsU"/>
+</div>
+<div class="aspect-square rounded-lg overflow-hidden opacity-60 hover:opacity-100 transition-opacity cursor-pointer">
+<img class="w-full h-full object-cover" data-alt="dense sunlit forest with tall pine trees and light rays filtering through the canopy" src="https://lh3.googleusercontent.com/aida-public/AB6AXuB5OQrTw6XwfmzS07EvoUY-e2imqAKK_0yeZXorGTKEyr1jC6rxh2qMVsG35-YIuUBs7hl3gIk8UEarX3ub0LB8xcld5_FiPkNW6V8cM13h6vfezyOp3wtmE0AZKYo99mU50oZUX_rsYLDSxxyTj9Ux7RvMtiJGNMEw6ALjp5ZESKUS8mB-RMaUupAN2o9W6lpg0sscqxyvzHQ9wuOUWECvOss3k8hu9sCMwh36jXukh0DF6Win9JW3ALWNCjHNb0fD7NKA2Yttt-Q"/>
+</div>
+<div class="aspect-square rounded-lg overflow-hidden opacity-60 hover:opacity-100 transition-opacity cursor-pointer">
+<img class="w-full h-full object-cover" data-alt="majestic waterfall cascading down mossy green cliffs in a tropical rainforest" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDe8wAMlOuPcTHGF6-Yfkbn7QPUgCGlh6LHUBPHbVxPQpcrNGFrwbCAkzgIi6ZW5rHE3RpfC81EB-AtEYg0q048VvxFcz6I1i3Am0laq4wt2VpBGOjUQW29ovSjtEyenEesuhixa2u7m90C3AmLzv_gf1iF_KpTPCCFO2NC-Ma0tHUHU7ye691wexuphYqakXuVraciA8_W4v5IyUrIq33poFU3IIHJH4xy56AoXLcC6LVYYmCWkLWqdork-kJz-uk--0EOs7eJgfk"/>
+</div>
+<div class="aspect-square rounded-lg overflow-hidden opacity-60 hover:opacity-100 transition-opacity cursor-pointer">
+<img class="w-full h-full object-cover" data-alt="aerial view of winding river through lush green valley landscape at sunset" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCvIDqn0rE2oFxCXffV0FRz-mDXL-hUUmQwL5rMpMMbLYV2oQyRa7zAj4aecjcqun2lOFH1VRUwME8lk5ff0mkBDpqYhsyEIbTvVcJ9quKYLDKQEZaBiFPoo82kuv_l9qlTG_4Uyfg0zYRfPTggBkvJzJdExGNJd0tPOIcLAEdk3NyWsXyEaW55WcAfOCCMw4n4Q6qnolXeHXUIL1c8pqQmI5CN1-my5S0nOnSjnDy7AjnZCY_iLD5y7h6C8VWOPtGzcDgMXPgfvs8"/>
+</div>
+<div class="aspect-square rounded-lg overflow-hidden opacity-60 hover:opacity-100 transition-opacity cursor-pointer">
+<img class="w-full h-full object-cover" data-alt="wide panoramic view of rolling green hills and a small cottage in the distance" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCEjW_EFaGmrdA9SeUC0W1JnNHdDGJf-lFXwDBOo3Q9BWqE8vdQl2nsK5fCKGfRfaRnIH5W0-dCPxOZx7kWj3cwwqgU2S1eiUef0rmSF99RAvOURsM-XgfzjUoNY9mtOMMdqgxzYO_rdasD3B9Hyx-O7JqtyU4umgessOYnBPOK9LPnaIlcboFtc8wggyymLo0BIWuqhk15xiVgHMAtwFaFfM8T3uE-zN4FNKlLZbF0G-KGYHDat5JRrtZqS3XnyIcbd6bi9i9uLPo"/>
+</div>
+</div>
+</section>
+<!-- Step 3: Preview and Run -->
+<section class="bg-surface-container rounded-xl p-8 border-none overflow-hidden relative">
+<div class="absolute top-0 right-0 p-4">
+<div class="flex items-center gap-2 bg-primary/20 text-primary-fixed px-3 py-1 rounded-full text-xs mono">
+<span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+                            READY
+                        </div>
+</div>
+<div class="flex items-center gap-4 mb-6">
+<span class="mono w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold">03</span>
+<h2 class="text-xl font-semibold">Preview and Run</h2>
+</div>
+<div class="relative w-full aspect-[16/9] rounded-xl overflow-hidden mb-8 bg-surface-container-lowest">
+<img class="w-full h-full object-cover" data-alt="close-up of vibrant green forest leaves with morning dew and soft natural lighting" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCsBqVQkQ7RVVYPx9E-rLLJDUU-JWtol2-Wgd-r6XuUwMyAgjzGyR-kMJlm6-RRPk3MV6U59YE_EiNC9IpS124oyVUWWd3q1ngwZ04eIXN-U2NVlxmIbAdKj0G6LUfibGJ-7EONB1rOi7ulI7WIkA7O8HRiJ_rC99vOuxCOSjco3uVpDhAswAskl8xzmvfV-VMO1O6KkDCnbv7fTokovZ1PF8NGt_qlcW1BRuNoaGI1bhYOtioHxGPkZ0_MkdRosKH-Tt56yS2Iu8A"/>
+<div class="absolute inset-0 flex items-center justify-center bg-surface-container-lowest/40 backdrop-blur-sm opacity-0 hover:opacity-100 transition-opacity">
+<button class="bg-white text-black px-6 py-3 rounded-full font-bold shadow-xl">Change Image</button>
+</div>
+</div>
+<button class="w-full py-4 bg-gradient-to-r from-primary to-primary-container text-on-primary-fixed font-bold text-lg rounded-xl flex items-center justify-center gap-3 hover:shadow-lg transition-all active:scale-95">
+<span class="material-symbols-outlined">bolt</span>
+                        Run Comparison
+                    </button>
+</section>
+<!-- Results Section (Visible after run) -->
+<section class="bg-surface-container rounded-xl p-8 space-y-6">
+<div class="flex items-center justify-between">
+<h2 class="text-2xl font-bold">Inference Results</h2>
+<div class="flex items-center gap-2 bg-error-container/20 text-error px-3 py-1.5 rounded-lg border border-error/20">
+<span class="material-symbols-outlined text-[18px]">warning</span>
+<span class="text-xs font-semibold mono">PREDICTION MISMATCH</span>
+</div>
+</div>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+<!-- Baseline Predictions -->
+<div class="space-y-4">
+<div class="flex items-center justify-between">
+<span class="text-xs mono text-on-surface-variant uppercase tracking-widest">Baseline (FP32)</span>
+<span class="text-xs mono text-primary">8.4ms Latency</span>
+</div>
+<div class="bg-surface-container-low rounded-xl p-6 space-y-4">
+<div class="space-y-1">
+<div class="flex justify-between items-end">
+<span class="font-bold text-lg">Deciduous Forest</span>
+<span class="mono text-primary">94.2%</span>
+</div>
+<div class="w-full h-2 bg-surface-variant rounded-full overflow-hidden">
+<div class="h-full bg-primary" style="width: 94.2%"></div>
+</div>
+</div>
+<div class="space-y-1">
+<div class="flex justify-between items-end">
+<span class="text-sm font-medium opacity-70">Rainforest Canopy</span>
+<span class="mono text-sm opacity-70">4.1%</span>
+</div>
+<div class="w-full h-1.5 bg-surface-variant rounded-full overflow-hidden">
+<div class="h-full bg-primary/40" style="width: 4.1%"></div>
+</div>
+</div>
+<div class="space-y-1">
+<div class="flex justify-between items-end">
+<span class="text-sm font-medium opacity-70">Fern Valley</span>
+<span class="mono text-sm opacity-70">1.2%</span>
+</div>
+<div class="w-full h-1.5 bg-surface-variant rounded-full overflow-hidden">
+<div class="h-full bg-primary/40" style="width: 1.2%"></div>
+</div>
+</div>
+</div>
+</div>
+<!-- Compressed Predictions -->
+<div class="space-y-4">
+<div class="flex items-center justify-between">
+<span class="text-xs mono text-on-surface-variant uppercase tracking-widest">Quantized (INT8)</span>
+<span class="text-xs mono text-secondary">2.1ms Latency</span>
+</div>
+<div class="bg-surface-container-low rounded-xl p-6 space-y-4 border border-error/30 ring-2 ring-error/10">
+<div class="space-y-1">
+<div class="flex justify-between items-end">
+<span class="font-bold text-lg text-error">Rainforest Canopy</span>
+<span class="mono text-error">89.8%</span>
+</div>
+<div class="w-full h-2 bg-surface-variant rounded-full overflow-hidden">
+<div class="h-full bg-error" style="width: 89.8%"></div>
+</div>
+</div>
+<div class="space-y-1">
+<div class="flex justify-between items-end">
+<span class="text-sm font-medium opacity-70">Deciduous Forest</span>
+<span class="mono text-sm opacity-70">8.4%</span>
+</div>
+<div class="w-full h-1.5 bg-surface-variant rounded-full overflow-hidden">
+<div class="h-full bg-secondary/40" style="width: 8.4%"></div>
+</div>
+</div>
+<div class="space-y-1">
+<div class="flex justify-between items-end">
+<span class="text-sm font-medium opacity-70">Wetland</span>
+<span class="mono text-sm opacity-70">1.5%</span>
+</div>
+<div class="w-full h-1.5 bg-surface-variant rounded-full overflow-hidden">
+<div class="h-full bg-secondary/40" style="width: 1.5%"></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</section>
+</div>
+<!-- Sidebar: Comparison History -->
+<aside class="lg:col-span-4 space-y-6">
+<div class="bg-surface-container rounded-xl p-6 h-fit sticky top-24">
+<div class="flex items-center justify-between mb-6">
+<h3 class="text-lg font-bold">Recent Runs</h3>
+<button class="text-xs mono text-error hover:underline transition-all">Clear History</button>
+</div>
+<div class="space-y-4">
+<!-- History Item 1 -->
+<div class="group cursor-pointer">
+<div class="flex gap-3 p-3 rounded-lg hover:bg-surface-container-low transition-colors border border-transparent hover:border-outline-variant/15">
+<div class="w-16 h-16 rounded overflow-hidden flex-shrink-0">
+<img class="w-full h-full object-cover grayscale group-hover:grayscale-0 transition-all" data-alt="solitary oak tree in a vast golden wheat field under a clear blue sky" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCZgMYPTk_gE7y4dXBOqhy7HuSM2JDB8hSbfGPOgVDbcyEYallIZplde9FiFrzNDj_SIg2nGItyvyJO2dlPQXlN5qY-gFliZ3iqhw5X5_A4zrFyUBNmVhcTO8jcP2_5PXAIrtjDeTL2CRJGqQcyycAJapLZGv4OcmTghGYUJEHLLdks-HQ_sSjvRNf0ADwM7zpaisUexIL4vl3cer1ftu2J7VQDNTv3_xr-xNM6uFIMdtoK0Lwm2CO9Cqh7MbFUSVn9BAhznXgBo-0"/>
+</div>
+<div class="flex flex-col justify-between py-1">
+<span class="text-sm font-bold truncate">Oak Wheat Field</span>
+<span class="text-[10px] mono text-primary">MATCH • 98.2% Conf</span>
+<span class="text-[10px] mono text-on-surface-variant">2 mins ago</span>
+</div>
+</div>
+</div>
+<!-- History Item 2 -->
+<div class="group cursor-pointer">
+<div class="flex gap-3 p-3 rounded-lg hover:bg-surface-container-low transition-colors border border-transparent hover:border-outline-variant/15">
+<div class="w-16 h-16 rounded overflow-hidden flex-shrink-0">
+<img class="w-full h-full object-cover grayscale group-hover:grayscale-0 transition-all" data-alt="majestic waterfall cascading down mossy green cliffs in a tropical rainforest" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBS0WmilriK_7lL6y4WEc6p-UzGBABldj7rXG5XXeR2ZANxUY5IreEKnO1SnjAgX_sayBum4mvPJuq5VTeyFGWYidaWzMM0qSJw_c-krirJCwFTZ5mOFI5cS7B3qsZZAOyzQ--tKZifck8Aa2zQAAwq1OFO5QLLR3D1zo9EmTXLmA76zlDATHa2YEon7q_QUb0eEvdcbNgOvpgFndCabni-BDbux31mU6DfhugGNsddujjxCowULBLo2xQcwtPmRQzuzCauCh2AbhQ"/>
+</div>
+<div class="flex flex-col justify-between py-1">
+<span class="text-sm font-bold truncate">Cascading Waterfall</span>
+<span class="text-[10px] mono text-error">MISMATCH • Δ 12.4%</span>
+<span class="text-[10px] mono text-on-surface-variant">15 mins ago</span>
+</div>
+</div>
+</div>
+<!-- History Item 3 -->
+<div class="group cursor-pointer">
+<div class="flex gap-3 p-3 rounded-lg hover:bg-surface-container-low transition-colors border border-transparent hover:border-outline-variant/15">
+<div class="w-16 h-16 rounded overflow-hidden flex-shrink-0">
+<img class="w-full h-full object-cover grayscale group-hover:grayscale-0 transition-all" data-alt="aerial view of winding river through lush green valley landscape at sunset" src="https://lh3.googleusercontent.com/aida-public/AB6AXuA7cR78ZT-Z3WQ6ugwjK2aRJI8IugZOz0MBT3ntqi039RXMfe73xFMqWzSy9OIAPhH6Vjby7T9OL6KnuA1VrBewhrMVG5_Dkvu0-B3V1njMQOTY71SkMEntVUfnRPB3Cm51Ee6pE5ZoQyTYqcjyMx2cAaDLNaiKg_6dBV_fSTRd69r-6Q2d8L0OtQAMV006BJm0bEncepyqoFrnImc2f9bRi6vN1r0QbA9ljtnRV-GbVoURoMoS09fu0ZJHzsSKEOzgtohzYrcx1eo"/>
+</div>
+<div class="flex flex-col justify-between py-1">
+<span class="text-sm font-bold truncate">Winding Valley River</span>
+<span class="text-[10px] mono text-primary">MATCH • 92.1% Conf</span>
+<span class="text-[10px] mono text-on-surface-variant">1 hour ago</span>
+</div>
+</div>
+</div>
+</div>
+<div class="mt-8 pt-6 border-t border-outline-variant/10 text-center">
+<p class="text-xs text-on-surface-variant italic font-light">"Edge-ready compression for a sustainable digital ecosystem."</p>
+</div>
+</div>
+</aside>
+</div>
+</main>
+<!-- Footer -->
+<footer class="w-full py-8 mt-auto bg-zinc-950 border-t border-emerald-900/10">
+<div class="max-w-7xl mx-auto px-8 flex flex-col items-center space-y-4 text-center">
+<span class="text-emerald-400 font-semibold">GreenAI Project Context 2025</span>
+<div class="flex gap-6">
+<a class="text-xs text-zinc-600 hover:text-emerald-300 transition-colors" href="#">Models</a>
+<a class="text-xs text-zinc-600 hover:text-emerald-300 transition-colors" href="#">Datasets</a>
+<a class="text-xs text-zinc-600 hover:text-emerald-300 transition-colors" href="#">Compression Techniques</a>
+</div>
+<p class="text-[0.75rem] text-zinc-600 mono">Carbon Offset: 1.2kg CO2e this session</p>
+</div>
+</footer>
+</body></html>
