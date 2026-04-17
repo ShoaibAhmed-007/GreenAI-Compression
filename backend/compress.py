@@ -2629,6 +2629,20 @@ def run_compression(model_name, method, dataset='CIFAR10',
     print(f"\n  Result: acc={result.get('compressed_accuracy')}%  "
           f"size={result.get('size_MB')} MB  "
           f"reduction={result.get('size_reduction_percent')}%")
+
+    # Persist result to a per-model-per-method JSON file so it survives
+    # across server restarts and is not overwritten by subsequent runs.
+    try:
+        results_dir = os.path.join(os.path.dirname(__file__), '..', 'results')
+        os.makedirs(results_dir, exist_ok=True)
+        result_filename = f"{model_key}_{method}_compression_result.json"
+        result_path = os.path.join(results_dir, result_filename)
+        with open(result_path, 'w') as _f:
+            json.dump(result, _f, indent=2)
+        print(f"  Saved result → {result_path}")
+    except Exception as _save_err:
+        print(f"  [Warning] Could not save result JSON: {_save_err}")
+
     return result
 
 
