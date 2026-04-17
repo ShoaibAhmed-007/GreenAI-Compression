@@ -692,15 +692,29 @@ def _build_fair_comparison_metrics(
     measured_baseline_total_co2 = round(max(baseline_train_co2, 0.0) + max(baseline_infer_co2, 0.0), 12)
     measured_compressed_total_co2 = round(max(compressed_train_co2, 0.0) + max(compressed_infer_co2, 0.0), 12)
     baseline_total_co2 = measured_baseline_total_co2
-    compressed_total_co2 = _linear_co2_from_size_ratio(
-        baseline_total_co2,
-        baseline_size_mb,
-        compressed_size_mb,
-    )
-    if compressed_total_co2 is None:
+
+    # Prefer measured CO2 from controlled benchmark (most accurate).
+    # Fall back to latency+size weighted projection only when measurement is zero.
+    if measured_compressed_total_co2 > 0:
         compressed_total_co2 = measured_compressed_total_co2
+    elif baseline_total_co2 > 0:
+        # Weighted projection: 60% latency ratio (compute time ∝ energy draw)
+        # + 40% size ratio (memory bandwidth ∝ data movement energy)
+        latency_ratio = (compressed_latency_ms / baseline_latency_ms
+                         if baseline_latency_ms > 0 else 1.0)
+        size_ratio = (compressed_size_mb / baseline_size_mb
+                      if baseline_size_mb > 0 else 1.0)
+        combined_ratio = 0.6 * latency_ratio + 0.4 * size_ratio
+        compressed_total_co2 = round(baseline_total_co2 * combined_ratio, 12)
         warnings.append(
-            "Unable to project compressed CO2 from model-size ratio; using measured benchmark totals."
+            "Measured compressed CO2 is zero; using latency+size weighted projection "
+            f"(latency_ratio={latency_ratio:.4f}, size_ratio={size_ratio:.4f})."
+        )
+    else:
+        compressed_total_co2 = 0.0
+        warnings.append(
+            "Both baseline and compressed measured CO2 are zero; "
+            "workload may be too short for measurable emissions."
         )
 
     baseline_total_energy = round(max(baseline_train_energy, 0.0) + max(baseline_infer_energy, 0.0), 12)
@@ -740,7 +754,8 @@ def _build_fair_comparison_metrics(
         print(f"Accuracy (baseline vs compressed): {baseline_accuracy}% vs {compressed_accuracy}%")
     print(f"CO2 (baseline vs compressed): {baseline_total_co2} kg vs {compressed_total_co2} kg")
     print(
-        "CO2 projection formula: compressed = baseline * (compressed_size_MB / baseline_size_MB)"
+        "CO2 method: measured benchmark values preferred; "
+        "fallback = baseline * (0.6*latency_ratio + 0.4*size_ratio)"
     )
     print(f"CO2 reduction: {co2_reduction_percent if co2_reduction_percent is not None else 'N/A'}%")
     print(f"Model size (baseline vs compressed): {baseline_size_mb} MB vs {compressed_size_mb} MB")
@@ -1215,33 +1230,34 @@ def apply_pruning(model, train_loader, test_loader, device,
     training_started_at = time.time()
 
     try:
-        # 🔥 FAST gradual pruning
+        # Gradual global unstructured pruning (preserves accuracy better than layer-wise)
         prune_steps = 2
         step_amount = amount / prune_steps
 
         for step in range(prune_steps):
             _cb(f"Pruning step {step+1}/{prune_steps}...")
 
-            for module in model.modules():
-                if isinstance(module, (nn.Conv2d, nn.Linear)):
-                    prune.l1_unstructured(module, name='weight', amount=step_amount)
+            params_to_prune = _collect_prunable_modules(model)
+            prune.global_unstructured(
+                params_to_prune,
+                pruning_method=prune.L1Unstructured,
+                amount=step_amount,
+            )
 
-            # 🔥 quick recovery
-            optimizer = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
+            # Recovery training (full dataset per epoch)
+            optimizer = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9,
+                                  weight_decay=5e-4)
 
-            for _ in range(1):  # only 1 epoch
-                model.train()
-                for batch_idx, (inputs, labels) in enumerate(train_loader):
-                    if batch_idx >= 100:
-                        break
-                    inputs, labels = inputs.to(device), labels.to(device)
+            model.train()
+            for inputs, labels in train_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
 
-                    optimizer.zero_grad()
-                    loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
-                    loss.backward()
-                    optimizer.step()
+                optimizer.zero_grad()
+                loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+                loss.backward()
+                optimizer.step()
 
-        # 🔥 Final fine-tuning (FAST)
+        # Final fine-tuning after pruning (full dataset per epoch)
         _cb("Final fine-tuning after pruning...")
         optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -1253,9 +1269,7 @@ def apply_pruning(model, train_loader, test_loader, device,
 
         for epoch in range(fine_tune_epochs):
             model.train()
-            for batch_idx, (inputs, labels) in enumerate(train_loader):
-                if batch_idx >= 100:
-                    break
+            for inputs, labels in train_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
 
                 optimizer.zero_grad()
@@ -1263,8 +1277,8 @@ def apply_pruning(model, train_loader, test_loader, device,
                 loss.backward()
                 optimizer.step()
 
-            # 🔥 Fast eval during training
-            acc = evaluate(model, test_loader, dev=device, max_batches=30)
+            # Full eval during training
+            acc = evaluate(model, test_loader, dev=device)
             _cb(f"[Pruning FT] Epoch {epoch+1}: {acc:.2f}%")
 
             if acc > best_acc:
@@ -1422,54 +1436,119 @@ def apply_quantization(model, train_loader, test_loader, device,
         model.train()
         fallback_float_model = copy.deepcopy(model).cpu().eval()
 
-        if hasattr(model, 'fuse_model'):
-            model.fuse_model()
-
         qat_api = _get_quantization_api()
         backend = _configure_quantized_backend()
         _cb(f"Using quantized backend: {backend}")
-        model.qconfig = qat_api.get_default_qat_qconfig(backend)
-        qat_api.prepare_qat(model, inplace=True)
 
-        # ✅ STRONG QAT TRAINING (all on CPU)
-        _cb("Starting QAT training (CPU)...")
-        optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
-        qat_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=max(1, fine_tune_epochs)
-        )
-
-        best_acc = 0
-        best_state = copy.deepcopy(model.state_dict())
-
-        for epoch in range(fine_tune_epochs):
-            for inputs, labels in train_loader:
-                inputs, labels = inputs.to(qat_dev), labels.to(qat_dev)
-
-                optimizer.zero_grad()
-                loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
-                loss.backward()
-                optimizer.step()
-
-            acc = evaluate(model, test_loader, dev=qat_dev)
-            _cb(f"QAT Epoch {epoch+1}/{fine_tune_epochs} - Accuracy: {acc:.2f}%")
-
-            if acc > best_acc:
-                best_acc = acc
-                best_state = copy.deepcopy(model.state_dict())
-            qat_scheduler.step()
-
-        model.load_state_dict(best_state)
-
-        # ✅ Convert to INT8 (on CPU — required by quantized kernels)
-        _cb("Converting to INT8 (CPU)...")
-        model.eval()
+        # --- Attempt 1: Full Quantization-Aware Training (QAT) ---
+        qat_succeeded = False
         try:
+            # Wrap model with QuantStub/DeQuantStub if it lacks native quant support.
+            # This prevents "input tensor dtype didn't match" errors on architectures
+            # without built-in quant/dequant stubs (DenseNet, EfficientNet, GoogLeNet, etc.)
+            QuantWrapper = getattr(qat_api, 'QuantWrapper',
+                                   getattr(torch.quantization, 'QuantWrapper', None))
+            needs_wrapper = not (hasattr(model, 'quant') and hasattr(model, 'dequant'))
+            if needs_wrapper and QuantWrapper is not None:
+                model = QuantWrapper(model)
+                _cb("Wrapped model with QuantStub/DeQuantStub for QAT compatibility")
+
+            if hasattr(model, 'fuse_model'):
+                model.fuse_model()
+
+            model.qconfig = qat_api.get_default_qat_qconfig(backend)
+            qat_api.prepare_qat(model, inplace=True)
+
+            # Validation forward pass — catch incompatible architectures BEFORE
+            # wasting time on the full QAT training loop.
+            with torch.no_grad():
+                test_input = torch.randn(1, *input_shape[1:]).to(qat_dev)
+                model.eval()
+                _extract_logits(model(test_input))
+                model.train()
+            _cb("QAT preparation validated successfully")
+
+            # ✅ QAT TRAINING (all on CPU)
+            _cb("Starting QAT training (CPU)...")
+            optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
+            qat_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=max(1, fine_tune_epochs)
+            )
+
+            best_acc = 0
+            best_state = copy.deepcopy(model.state_dict())
+
+            for epoch in range(fine_tune_epochs):
+                model.train()
+                for inputs, labels in train_loader:
+                    inputs, labels = inputs.to(qat_dev), labels.to(qat_dev)
+
+                    optimizer.zero_grad()
+                    loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+                    loss.backward()
+                    optimizer.step()
+
+                acc = evaluate(model, test_loader, dev=qat_dev)
+                _cb(f"QAT Epoch {epoch+1}/{fine_tune_epochs} - Accuracy: {acc:.2f}%")
+
+                if acc > best_acc:
+                    best_acc = acc
+                    best_state = copy.deepcopy(model.state_dict())
+                qat_scheduler.step()
+
+            model.load_state_dict(best_state)
+
+            # Convert to INT8
+            _cb("Converting QAT model to INT8...")
+            model.eval()
             qat_api.convert(model, inplace=True)
             quantized_model = model
             quantization_type = "qat_int8"
-        except Exception as e:
-            print(f"[Quantization] QAT convert failed, using dynamic fallback: {e}")
-            quantization_type = "dynamic_int8_fallback_convert"
+            qat_succeeded = True
+
+        except Exception as qat_err:
+            print(f"[Quantization] QAT failed ({type(qat_err).__name__}): {qat_err}")
+            _cb("QAT incompatible with this architecture, trying static quantization...")
+
+        # --- Attempt 2: Post-Training Static Quantization (PTSQ) ---
+        ptsq_succeeded = False
+        if not qat_succeeded:
+            try:
+                model_ptsq = copy.deepcopy(fallback_float_model).to(qat_dev)
+                model_ptsq.eval()
+
+                QuantWrapper = getattr(qat_api, 'QuantWrapper',
+                                       getattr(torch.quantization, 'QuantWrapper', None))
+                if QuantWrapper is not None:
+                    model_ptsq = QuantWrapper(model_ptsq)
+
+                if hasattr(model_ptsq, 'fuse_model'):
+                    model_ptsq.fuse_model()
+
+                model_ptsq.qconfig = qat_api.get_default_qconfig(backend)
+                qat_api.prepare(model_ptsq, inplace=True)
+
+                # Calibrate with training data (observers collect activation statistics)
+                _cb("Calibrating static quantization (50 batches)...")
+                with torch.no_grad():
+                    for batch_idx, (inputs, _) in enumerate(train_loader):
+                        if batch_idx >= 50:
+                            break
+                        model_ptsq(inputs.to(qat_dev))
+
+                qat_api.convert(model_ptsq, inplace=True)
+                quantized_model = model_ptsq
+                quantization_type = "ptsq_int8"
+                ptsq_succeeded = True
+                _cb("Post-Training Static Quantization succeeded")
+
+            except Exception as ptsq_err:
+                print(f"[Quantization] PTSQ also failed ({type(ptsq_err).__name__}): {ptsq_err}")
+
+        # --- Attempt 3: Dynamic Quantization (always works) ---
+        if not qat_succeeded and not ptsq_succeeded:
+            _cb("Falling back to dynamic quantization (always compatible)...")
+            quantization_type = "dynamic_int8_fallback"
             base_for_fallback = fallback_float_model if fallback_float_model is not None else model.cpu().eval()
             quantized_model = torch.quantization.quantize_dynamic(
                 base_for_fallback, {nn.Linear}, dtype=torch.qint8
@@ -1725,23 +1804,44 @@ def apply_hybrid(model, train_loader, test_loader, device,
     nonzero = count_nonzero(model)
     total = count_params(model)
 
-    # Step 2: Quantize (only nn.Linear is actually supported by
-    # QAT so accuracy is preserved better than post-training quantization.
+    # Step 2: Quantize — QAT with QuantWrapper → PTSQ fallback → Dynamic fallback
     # QAT must run on CPU — fbgemm/qnnpack use QuantizedCPU kernel only
-    _cb("Applying QAT INT8 quantization (moving to CPU for QuantizedCPU backend)...")
+    _cb("Applying INT8 quantization (moving to CPU for QuantizedCPU backend)...")
     qat_dev = torch.device('cpu')
     model.to(qat_dev)
     model.eval()
     fallback_float_model = copy.deepcopy(model).cpu().eval()
+
+    qat_api = _get_quantization_api()
+    backend = _configure_quantized_backend()
+    _cb(f"Using quantized backend: {backend}")
+
+    # --- Attempt 1: Full QAT ---
+    hybrid_qat_succeeded = False
     try:
-        qat_api = _get_quantization_api()
-        backend = _configure_quantized_backend()
-        _cb(f"Using quantized backend: {backend}")
+        # Wrap model with QuantStub/DeQuantStub for architectures that lack native
+        # quant support — prevents "input tensor dtype didn't match" errors.
+        QuantWrapper = getattr(qat_api, 'QuantWrapper',
+                               getattr(torch.quantization, 'QuantWrapper', None))
+        needs_wrapper = not (hasattr(model, 'quant') and hasattr(model, 'dequant'))
+        if needs_wrapper and QuantWrapper is not None:
+            model = QuantWrapper(model)
+            _cb("Wrapped model with QuantStub/DeQuantStub for QAT compatibility")
+
         model.train()
         if hasattr(model, 'fuse_model'):
             model.fuse_model()
         model.qconfig = qat_api.get_default_qat_qconfig(backend)
         qat_api.prepare_qat(model, inplace=True)
+
+        # Validation forward pass — catch incompatible architectures early
+        with torch.no_grad():
+            test_input = torch.randn(1, *input_shape[1:]).to(qat_dev)
+            model.eval()
+            _extract_logits(model(test_input))
+            model.train()
+        _cb("Hybrid QAT preparation validated successfully")
+
         best_state = copy.deepcopy(model.state_dict())
         best_acc_qat = baseline_acc
         optimizer = optim.SGD(model.parameters(), lr=5e-4,
@@ -1749,6 +1849,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
         qat_epochs = max(1, fine_tune_epochs)
         for epoch in range(qat_epochs):
             _cb(f"Hybrid QAT epoch {epoch+1}/{qat_epochs}...")
+            model.train()
             for batch_idx, (inputs, labels) in enumerate(train_loader):
                 if batch_idx >= 50:
                     break
@@ -1778,11 +1879,52 @@ def apply_hybrid(model, train_loader, test_loader, device,
         qat_api.convert(model, inplace=True)
         quant_model = model
         hybrid_quantization_type = "qat_int8"
-    except Exception as e:
-        print(f"[Hybrid/QAT] Falling back to dynamic quantization for {model_name}: {e}")
+        hybrid_qat_succeeded = True
+
+    except Exception as qat_err:
+        print(f"[Hybrid/QAT] QAT failed ({type(qat_err).__name__}): {qat_err}")
+        _cb("QAT incompatible, trying static quantization...")
+
+    # --- Attempt 2: Post-Training Static Quantization (PTSQ) ---
+    hybrid_ptsq_succeeded = False
+    if not hybrid_qat_succeeded:
+        try:
+            model_ptsq = copy.deepcopy(fallback_float_model).to(qat_dev)
+            model_ptsq.eval()
+
+            QuantWrapper = getattr(qat_api, 'QuantWrapper',
+                                   getattr(torch.quantization, 'QuantWrapper', None))
+            if QuantWrapper is not None:
+                model_ptsq = QuantWrapper(model_ptsq)
+
+            if hasattr(model_ptsq, 'fuse_model'):
+                model_ptsq.fuse_model()
+
+            model_ptsq.qconfig = qat_api.get_default_qconfig(backend)
+            qat_api.prepare(model_ptsq, inplace=True)
+
+            _cb("Calibrating hybrid static quantization (50 batches)...")
+            with torch.no_grad():
+                for batch_idx, (inputs, _) in enumerate(train_loader):
+                    if batch_idx >= 50:
+                        break
+                    model_ptsq(inputs.to(qat_dev))
+
+            qat_api.convert(model_ptsq, inplace=True)
+            quant_model = model_ptsq
+            hybrid_quantization_type = "ptsq_int8"
+            hybrid_ptsq_succeeded = True
+            _cb("Hybrid PTSQ succeeded")
+
+        except Exception as ptsq_err:
+            print(f"[Hybrid/PTSQ] PTSQ also failed ({type(ptsq_err).__name__}): {ptsq_err}")
+
+    # --- Attempt 3: Dynamic Quantization (always works) ---
+    if not hybrid_qat_succeeded and not hybrid_ptsq_succeeded:
+        _cb("Falling back to dynamic quantization (always compatible)...")
         hybrid_quantization_type = "dynamic_int8_fallback"
         quant_model = torch.quantization.quantize_dynamic(
-            model.cpu().eval(), {nn.Linear}, dtype=torch.qint8
+            fallback_float_model, {nn.Linear}, dtype=torch.qint8
         )
 
     # Save hybrid model
@@ -1793,7 +1935,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
     _cb("Evaluating hybrid model...")
     cpu_dev = torch.device('cpu')
     try:
-        hybrid_acc = evaluate(quant_model, test_loader, dev=cpu_dev, max_batches=50)
+        hybrid_acc = evaluate(quant_model, test_loader, dev=cpu_dev)
     except Exception as e:
         print(f"[Hybrid] Runtime fallback to dynamic quantization: {e}")
         hybrid_quantization_type = "dynamic_int8_fallback_runtime"
@@ -1801,7 +1943,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
             fallback_float_model, {nn.Linear}, dtype=torch.qint8
         )
         save_path, hybrid_size = save_smallest_artifact(quant_model, save_path, prefer_sparse=True)
-        hybrid_acc = evaluate(quant_model, test_loader, dev=cpu_dev, max_batches=50)
+        hybrid_acc = evaluate(quant_model, test_loader, dev=cpu_dev)
     latency = measure_latency(quant_model, input_shape=input_shape, dev=cpu_dev, n_runs=20)
 
     inference_emissions_kg, inference_energy_kwh, inference_duration_s = _track_inference_emissions(
