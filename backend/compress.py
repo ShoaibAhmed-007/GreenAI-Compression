@@ -2324,7 +2324,7 @@ def compress_dynamic(model_path, strategy, dataset='CIFAR10',
     strategy = strategy.lower().strip()
     if strategy == 'pruning':
         result = apply_pruning(model, train_loader, test_loader, device,
-                               amount=0.30, fine_tune_epochs=fine_tune_epochs,
+                               amount=0.70, fine_tune_epochs=max(10, fine_tune_epochs),
                                save_dir=save_dir,
                                model_name=uploaded_model_name,
                                accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
@@ -2728,7 +2728,7 @@ def run_compression(model_name, method, dataset='CIFAR10',
     method = method.lower().strip()
     if method == 'pruning':
         result = apply_pruning(model, train_loader, test_loader, device,
-                               amount=0.30, fine_tune_epochs=fine_tune_epochs,
+                               amount=0.70, fine_tune_epochs=max(10, fine_tune_epochs),
                                save_dir=save_dir, progress_cb=compress_cb,
                                model_name=model_key,
                                accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
