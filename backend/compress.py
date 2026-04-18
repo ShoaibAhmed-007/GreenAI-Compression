@@ -465,8 +465,10 @@ def measure_latency(model, input_shape=(1, 3, 32, 32), dev=None, n_runs=100):
             dev = torch.device('cpu')
     model.eval()
     dummy = torch.randn(*input_shape).to(dev)
-    # Warmup
-    for _ in range(10):
+    # Torch-TensorRT runtime wrappers may trigger several lazy recompiles/
+    # graph specializations before reaching steady-state.
+    warmup_runs = 40 if _is_tensorrt_runtime_model(model) else 10
+    for _ in range(warmup_runs):
         with torch.no_grad():
             model(dummy)
     if dev.type == 'cuda':
@@ -577,26 +579,59 @@ def _finalize_emissions_tracking(tracker, phase_label, started_at):
 
 def _track_inference_emissions(model, loader, dev, project_name, output_dir, max_batches=None):
     """Run a bounded inference workload under CodeCarbon and return emissions metrics."""
+    model = model.to(dev)
+    model.eval()
+
+    trt_runtime = _is_tensorrt_runtime_model(model)
+    static_batch_size = None
+
+    if trt_runtime:
+        # Torch-TensorRT can recompile heavily when the tail batch has a
+        # different size; pin to the first batch shape for measured passes.
+        try:
+            first_inputs, _ = next(iter(loader))
+            static_batch_size = int(first_inputs.size(0))
+        except Exception:
+            static_batch_size = None
+
+        # Exclude lazy compile/recompile warmup from the measured emissions.
+        warmup_batches = max_batches if max_batches is not None else 8
+        warmup_batches = max(1, min(int(warmup_batches), 8))
+        try:
+            for _ in range(2):
+                executed, _ = _run_inference_pass(
+                    model,
+                    loader,
+                    dev,
+                    max_batches=warmup_batches,
+                    static_batch_size=static_batch_size,
+                )
+                if executed == 0:
+                    break
+            if str(dev).startswith('cuda'):
+                torch.cuda.synchronize()
+        except Exception as warmup_err:
+            print(f"[CodeCarbon] TRT warmup failed before measurement: {warmup_err}")
+
     tracker = _start_emissions_tracker(project_name=project_name, output_dir=output_dir)
     started_at = time.time()
     inference_error = None
+    skipped_batches_total = 0
     try:
         start_workload = time.time()
-        model = model.to(dev)
-        model.eval()
-        with torch.no_grad():
-            # Keep GPU active for at least 3 seconds so CodeCarbon can sample
-            # short, high-throughput workloads (e.g., RTX 5090).
-            while (time.time() - start_workload) < 3.0:
-                loop_batches = 0
-                for batch_idx, (inputs, _) in enumerate(loader):
-                    if max_batches is not None and batch_idx >= max_batches:
-                        break
-                    inputs = inputs.to(dev)
-                    _extract_logits(model(inputs))
-                    loop_batches += 1
-                if loop_batches == 0:
-                    break
+        # Keep GPU active for at least 3 seconds so CodeCarbon can sample
+        # short, high-throughput workloads (e.g., RTX 5090).
+        while (time.time() - start_workload) < 3.0:
+            loop_batches, skipped_batches = _run_inference_pass(
+                model,
+                loader,
+                dev,
+                max_batches=max_batches,
+                static_batch_size=static_batch_size,
+            )
+            skipped_batches_total += skipped_batches
+            if loop_batches == 0:
+                break
 
         if str(dev).startswith('cuda'):
             torch.cuda.synchronize()
@@ -611,6 +646,11 @@ def _track_inference_emissions(model, loader, dev, project_name, output_dir, max
 
     if inference_error is not None:
         print(f"[CodeCarbon] Inference tracking workload failed: {inference_error}")
+    if trt_runtime and skipped_batches_total > 0:
+        print(
+            f"[Benchmark] Skipped {skipped_batches_total} non-static batches "
+            f"for TRT runtime in {project_name}."
+        )
     return emissions_kg, energy_kwh, duration_s
 
 
@@ -1007,6 +1047,36 @@ def _extract_logits(outputs):
         if hasattr(first, 'logits') and isinstance(first.logits, torch.Tensor):
             return first.logits
     raise TypeError(f"Unsupported model output type: {type(outputs)}")
+
+
+def _is_tensorrt_runtime_model(model):
+    """Best-effort check for Torch-TensorRT runtime wrappers."""
+    cls = model.__class__
+    module_name = str(getattr(cls, '__module__', '')).lower()
+    class_name = str(getattr(cls, '__name__', '')).lower()
+    markers = ('torch_tensorrt', 'tensorrt', 'torchtrt')
+    return any(m in module_name for m in markers) or any(m in class_name for m in markers)
+
+
+def _run_inference_pass(model, loader, dev, max_batches=None, static_batch_size=None):
+    """Run one bounded inference pass and return (executed_batches, skipped_batches)."""
+    executed_batches = 0
+    skipped_batches = 0
+
+    with torch.no_grad():
+        for inputs, _ in loader:
+            if max_batches is not None and executed_batches >= max_batches:
+                break
+
+            if static_batch_size is not None and int(inputs.size(0)) != int(static_batch_size):
+                skipped_batches += 1
+                continue
+
+            inputs = inputs.to(dev)
+            _extract_logits(model(inputs))
+            executed_batches += 1
+
+    return executed_batches, skipped_batches
 
 
 DEFAULT_ACCURACY_DROP_THRESHOLD = 2.5
