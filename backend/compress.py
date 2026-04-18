@@ -353,11 +353,14 @@ def load_compressed(path, device='cpu'):
     return state
 
 
-def export_to_tensorrt(model, input_shape, save_path, prefer_int8=True):
+def export_to_tensorrt(model, input_shape, save_path, prefer_int8=True, min_block_size=1):
     """Compile a model with TensorRT and best-effort persist a runtime artifact.
 
     Falls back through precision modes to keep TensorRT runtime available:
     INT8 (when modelopt is installed) -> FP16 -> FP32.
+
+    Args:
+        min_block_size: TensorRT partition size threshold for torch.compile path.
 
     Returns:
         tuple: (compiled_model, backend_label, saved_artifact_path, precision_mode)
@@ -396,19 +399,18 @@ def export_to_tensorrt(model, input_shape, save_path, prefer_int8=True):
                 "enabled_precisions": enabled_precisions,
             }
 
-            # Lower partition threshold so architectures with many small blocks
-            # (e.g., ShuffleNet variants) still convert useful TRT subgraphs.
             try:
                 trt_gm = torch_tensorrt.compile(
                     model,
-                    min_block_size=1,
+                    min_block_size=max(1, int(min_block_size)),
                     **compile_kwargs,
                 )
             except TypeError:
                 trt_gm = torch_tensorrt.compile(model, **compile_kwargs)
             except Exception as partition_err:
                 print(
-                    f"[Quantization] TensorRT {precision_mode.upper()} compile with min_block_size=1 failed "
+                    f"[Quantization] TensorRT {precision_mode.upper()} compile with "
+                    f"min_block_size={min_block_size} failed "
                     f"({type(partition_err).__name__}): {partition_err}; retrying default partitioning."
                 )
                 trt_gm = torch_tensorrt.compile(model, **compile_kwargs)
@@ -1383,6 +1385,37 @@ def _select_target_batch_size(total_params=None, default_batch_size=128, device=
     return 512, is_5090
 
 
+def _get_loader_batch_size(loader, fallback=1):
+    """Best-effort extraction of effective DataLoader batch size."""
+    batch_size = getattr(loader, 'batch_size', None)
+    if batch_size is not None:
+        try:
+            batch_size = int(batch_size)
+            if batch_size > 0:
+                return batch_size
+        except Exception:
+            pass
+    return int(fallback) if fallback and int(fallback) > 0 else 1
+
+
+def _shape_with_batch(input_shape, batch_size):
+    """Return input_shape with an explicit first-dimension batch size."""
+    if input_shape is None:
+        return None
+    shape = tuple(input_shape)
+    if len(shape) == 0:
+        return shape
+    return (int(batch_size),) + tuple(shape[1:])
+
+
+def _select_trt_min_block_size(model_key):
+    """Use smaller TRT partitions for lightweight models and coarser for heavy models."""
+    key = _slugify_name(model_key)
+    if key in LIGHTWEIGHT_MODEL_KEYS:
+        return 1
+    return 5
+
+
 def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32,
                      pin_memory=True, use_color_jitter=True,
                      total_params=None, model_key='model'):
@@ -1693,6 +1726,13 @@ def apply_quantization(model, train_loader, test_loader, device,
     selected_precision = "fp16" if use_fp16_safeguard else "int8"
     runtime_precision = selected_precision
     batch_size_used = getattr(train_loader, 'batch_size', None)
+    eval_batch_size = _get_loader_batch_size(
+        test_loader,
+        fallback=input_shape[0] if len(input_shape) > 0 else 1,
+    )
+    latency_input_shape = _shape_with_batch(input_shape, eval_batch_size)
+    trt_compile_input_shape = latency_input_shape
+    trt_min_block_size = _select_trt_min_block_size(model_key)
     hardware_state = (
         "Saturated (RTX 5090 Optimization Active)"
         if _is_rtx_5090(device=device)
@@ -1767,9 +1807,10 @@ def apply_quantization(model, train_loader, test_loader, device,
                     _cb("Exporting FP16 safeguard model to TensorRT...")
                     tensorrt_model, runtime_backend_used, saved_trt_path, tensorrt_precision_mode = export_to_tensorrt(
                         _safe_model_copy(deployment_float_model),
-                        input_shape,
+                        trt_compile_input_shape,
                         tensorrt_engine_path,
                         prefer_int8=False,
+                        min_block_size=trt_min_block_size,
                     )
                     tensorrt_engine_path = saved_trt_path
                     runtime_precision = tensorrt_precision_mode or "fp16"
@@ -1860,9 +1901,10 @@ def apply_quantization(model, train_loader, test_loader, device,
                         _cb("Exporting QAT model to TensorRT (INT8 -> FP16/FP32 fallback)...")
                         tensorrt_model, runtime_backend_used, saved_trt_path, tensorrt_precision_mode = export_to_tensorrt(
                             _safe_model_copy(deployment_float_model),
-                            input_shape,
+                            trt_compile_input_shape,
                             tensorrt_engine_path,
                             prefer_int8=(selected_precision == "int8"),
+                            min_block_size=trt_min_block_size,
                         )
                         tensorrt_engine_path = saved_trt_path
                         runtime_precision = tensorrt_precision_mode or selected_precision
@@ -2017,7 +2059,7 @@ def apply_quantization(model, train_loader, test_loader, device,
                 runtime_backend_used = "Torch Quantization (dynamic CPU fallback)"
                 runtime_precision = "int8"
         quant_acc = evaluate(benchmark_compressed_model, test_loader, dev=quant_eval_dev)
-    latency = measure_latency(benchmark_compressed_model, input_shape=input_shape, dev=quant_eval_dev)
+    latency = measure_latency(benchmark_compressed_model, input_shape=latency_input_shape, dev=quant_eval_dev)
 
     inference_emissions_kg, inference_energy_kwh, inference_duration_s = _track_inference_emissions(
         benchmark_compressed_model,
@@ -2039,8 +2081,8 @@ def apply_quantization(model, train_loader, test_loader, device,
         baseline_dev=device,
         compressed_dev=device,
         output_dir=save_dir,
-        baseline_input_shape=input_shape,
-        compressed_input_shape=input_shape,
+        baseline_input_shape=latency_input_shape,
+        compressed_input_shape=latency_input_shape,
         baseline_size_mb=baseline_size,
         compressed_size_mb=quant_size,
         benchmark_train_epochs=max(1, min(3, fine_tune_epochs)),
@@ -2096,8 +2138,10 @@ def apply_quantization(model, train_loader, test_loader, device,
         "energy_measurement_method": "CodeCarbon / GPU-Specific Power Draw",
         "runtime_backend_used": runtime_backend_used,
         "runtime_precision": runtime_precision,
+        "latency_batch_size_used": eval_batch_size,
         "tensorrt_engine_path": tensorrt_engine_path,
         "tensorrt_precision_mode": tensorrt_precision_mode,
+        "tensorrt_min_block_size": trt_min_block_size,
         "batch_size_used": batch_size_used,
         "hardware_state": hardware_state,
         "acceleration_backend": runtime_backend_used,
