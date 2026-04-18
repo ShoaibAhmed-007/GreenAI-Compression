@@ -1189,13 +1189,16 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32,
     train_ds = DSClass(root=data_root, train=True, download=True, transform=transform_train)
     test_ds = DSClass(root=data_root, train=False, download=True, transform=transform_test)
 
-    # num_workers=0 avoids Windows multiprocessing deadlocks (spawn method
-    # inside a daemon thread kills the DataLoader).  With 50-batch caps the
-    # overhead of main-process data loading is negligible (<10 s).
+    # On Linux (RunPod/Docker), fork-based multiprocessing is safe — use 4 workers
+    # so the CPU can resize images in parallel and keep the GPU fed.
+    # On Windows, spawn-based multiprocessing deadlocks inside daemon threads,
+    # so we keep num_workers=0 there.
+    import platform
+    _num_workers = 4 if platform.system() != 'Windows' else 0
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=0, pin_memory=pin_memory)
+                              num_workers=_num_workers, pin_memory=pin_memory)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
-                             num_workers=0, pin_memory=pin_memory)
+                             num_workers=_num_workers, pin_memory=pin_memory)
     return train_loader, test_loader
 
 def apply_pruning(model, train_loader, test_loader, device,
