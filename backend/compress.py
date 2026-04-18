@@ -31,8 +31,10 @@ import json
 import re
 import argparse
 import multiprocessing
+import platform
 try:
-    multiprocessing.set_start_method('spawn', force=True)
+    if platform.system() == 'Windows':
+        multiprocessing.set_start_method('spawn', force=True)
 except RuntimeError:
     pass
 
@@ -1199,10 +1201,11 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32,
     # spawn-based deadlocks in the PyTorch dataloader.
     import platform
     _num_workers = 8 if platform.system() != 'Windows' else 0
+    _persistent = True if _num_workers > 0 else False
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=_num_workers, pin_memory=pin_memory)
+                              num_workers=_num_workers, pin_memory=pin_memory, persistent_workers=_persistent)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
-                             num_workers=_num_workers, pin_memory=pin_memory)
+                             num_workers=_num_workers, pin_memory=pin_memory, persistent_workers=_persistent)
     return train_loader, test_loader
 
 def apply_pruning(model, train_loader, test_loader, device,
