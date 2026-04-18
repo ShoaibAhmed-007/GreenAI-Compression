@@ -9,7 +9,7 @@ set -euo pipefail
 
 export PYTHONUNBUFFERED=1
 TRT_VER="10.15.1.29"
-TORCH_TRT_VER="2.11.0+cu128"
+TORCH_TRT_VER="2.11.0"
 
 echo "[1/6] Inspect runtime"
 python - <<'PY'
@@ -23,7 +23,7 @@ if torch.cuda.is_available():
 PY
 
 echo "[2/6] Upgrade packaging tools"
-python -m pip install --upgrade pip setuptools wheel packaging
+python -m pip install --upgrade pip wheel packaging "setuptools<82"
 
 echo "[3/6] Install TensorRT and Torch-TensorRT (pinned compatible versions)"
 python -m pip uninstall -y \
@@ -39,7 +39,12 @@ python -m pip uninstall -y \
 python -m pip install --upgrade --extra-index-url https://pypi.nvidia.com \
     "tensorrt-cu12==${TRT_VER}" \
     "tensorrt-cu12-bindings==${TRT_VER}" \
-    "tensorrt-cu12-libs==${TRT_VER}" \
+    "tensorrt-cu12-libs==${TRT_VER}"
+
+# Torch-TensorRT CUDA 12.8 wheel is published on the PyTorch cu128 index.
+python -m pip install --upgrade \
+    --index-url https://download.pytorch.org/whl/cu128 \
+    --extra-index-url https://pypi.org/simple \
     "torch-tensorrt==${TORCH_TRT_VER}"
 
 echo "[4/6] Install modelopt (required for TensorRT INT8)"
