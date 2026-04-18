@@ -390,65 +390,51 @@ def export_to_tensorrt(model, input_shape, save_path, prefer_int8=True, min_bloc
     compile_modes.append(("fp32", {torch.float32}, "TensorRT FP32"))
 
     compile_errors = []
-    compile_irs = ["dynamo", "torch_compile"]
 
     for precision_mode, enabled_precisions, backend_label in compile_modes:
-        precision_compiled = False
-        for compile_ir in compile_irs:
+        try:
+            compile_kwargs = {
+                "ir": "torch_compile",
+                "inputs": [torch_tensorrt.Input(shape=tuple(input_shape), dtype=torch.float32)],
+                "enabled_precisions": enabled_precisions,
+            }
+
             try:
-                compile_kwargs = {
-                    "ir": compile_ir,
-                    "inputs": [torch_tensorrt.Input(shape=tuple(input_shape), dtype=torch.float32)],
-                    "enabled_precisions": enabled_precisions,
-                }
-
-                # Newer torch-tensorrt sets use_explicit_typing=True internally for
-                # the dynamo backend but then rejects enabled_precisions. Force it off.
-                if compile_ir == "dynamo":
-                    compile_kwargs["use_explicit_typing"] = False
-
-                try:
-                    trt_gm = torch_tensorrt.compile(
-                        model,
-                        min_block_size=max(1, int(min_block_size)),
-                        **compile_kwargs,
-                    )
-                except TypeError:
-                    trt_gm = torch_tensorrt.compile(model, **compile_kwargs)
-                except Exception as partition_err:
-                    print(
-                        f"[Quantization] TensorRT {precision_mode.upper()} ({compile_ir}) compile with "
-                        f"min_block_size={min_block_size} failed "
-                        f"({type(partition_err).__name__}): {partition_err}; retrying default partitioning."
-                    )
-                    if compile_ir == "dynamo":
-                        compile_kwargs["use_explicit_typing"] = False
-                    trt_gm = torch_tensorrt.compile(model, **compile_kwargs)
-
-                saved_path = ""
-                if save_path:
-                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                    path_root, path_ext = os.path.splitext(save_path)
-                    suffix = f"_{precision_mode}"
-                    artifact_path = f"{path_root}{suffix}{path_ext or '.ts'}"
-                    print(
-                        f"[Quantization] TensorRT compile succeeded via {compile_ir}; "
-                        "skipping artifact save for runtime module"
-                    )
-
-                precision_compiled = True
-                return trt_gm, backend_label, saved_path, precision_mode
-            except Exception as compile_err:
-                compile_errors.append(
-                    f"{precision_mode}:{compile_ir}:{type(compile_err).__name__}:{compile_err}"
+                trt_gm = torch_tensorrt.compile(
+                    model,
+                    min_block_size=max(1, int(min_block_size)),
+                    **compile_kwargs,
                 )
+            except TypeError:
+                trt_gm = torch_tensorrt.compile(model, **compile_kwargs)
+            except Exception as partition_err:
                 print(
-                    f"[Quantization] TensorRT {precision_mode.upper()} compile failed on {compile_ir} "
-                    f"({type(compile_err).__name__}): {compile_err}"
+                    f"[Quantization] TensorRT {precision_mode.upper()} compile with "
+                    f"min_block_size={min_block_size} failed "
+                    f"({type(partition_err).__name__}): {partition_err}; retrying default partitioning."
+                )
+                trt_gm = torch_tensorrt.compile(model, **compile_kwargs)
+
+            saved_path = ""
+            if save_path:
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                path_root, path_ext = os.path.splitext(save_path)
+                suffix = f"_{precision_mode}"
+                artifact_path = f"{path_root}{suffix}{path_ext or '.ts'}"
+                print(
+                    "[Quantization] TensorRT compile succeeded; skipping artifact save for "
+                    "torch_compile runtime module"
                 )
 
-        if not precision_compiled:
-            print(f"[Quantization] Exhausted all IR backends for {precision_mode.upper()} precision.")
+            return trt_gm, backend_label, saved_path, precision_mode
+        except Exception as compile_err:
+            compile_errors.append(
+                f"{precision_mode}:{type(compile_err).__name__}:{compile_err}"
+            )
+            print(
+                f"[Quantization] TensorRT {precision_mode.upper()} compile failed "
+                f"({type(compile_err).__name__}): {compile_err}"
+            )
 
     raise RuntimeError(
         "All TensorRT compile attempts failed: " + " | ".join(compile_errors)
@@ -593,7 +579,15 @@ def _finalize_emissions_tracking(tracker, phase_label, started_at):
     return emissions_kg, energy_kwh, round(elapsed_s, 2)
 
 
-def _track_inference_emissions(model, loader, dev, project_name, output_dir, max_batches=None):
+def _track_inference_emissions(
+    model,
+    loader,
+    dev,
+    project_name,
+    output_dir,
+    max_batches=None,
+    input_resize_to=None,
+):
     """Run a bounded inference workload under CodeCarbon and return emissions metrics."""
     model = model.to(dev)
     model.eval()
@@ -621,6 +615,7 @@ def _track_inference_emissions(model, loader, dev, project_name, output_dir, max
                     dev,
                     max_batches=warmup_batches,
                     static_batch_size=static_batch_size,
+                    input_resize_to=input_resize_to,
                 )
                 if executed == 0:
                     break
@@ -644,6 +639,7 @@ def _track_inference_emissions(model, loader, dev, project_name, output_dir, max
                 dev,
                 max_batches=max_batches,
                 static_batch_size=static_batch_size,
+                input_resize_to=input_resize_to,
             )
             skipped_batches_total += skipped_batches
             if loop_batches == 0:
@@ -670,8 +666,18 @@ def _track_inference_emissions(model, loader, dev, project_name, output_dir, max
     return emissions_kg, energy_kwh, duration_s
 
 
-def _track_training_emissions(model, loader, dev, project_name, output_dir,
-                              epochs=1, max_batches=40, lr=1e-3, weight_decay=5e-4):
+def _track_training_emissions(
+    model,
+    loader,
+    dev,
+    project_name,
+    output_dir,
+    epochs=1,
+    max_batches=40,
+    lr=1e-3,
+    weight_decay=5e-4,
+    input_resize_to=None,
+):
     """Track emissions for a standardized training benchmark workload.
 
     This workload is used for fair baseline-vs-compressed comparison under
@@ -700,6 +706,13 @@ def _track_training_emissions(model, loader, dev, project_name, output_dir,
                 if max_batches is not None and batch_idx >= max_batches:
                     break
                 inputs, labels = inputs.to(dev), labels.to(dev)
+                if input_resize_to is not None:
+                    inputs = F.interpolate(
+                        inputs,
+                        size=int(input_resize_to),
+                        mode='bilinear',
+                        align_corners=False,
+                    )
                 optimizer.zero_grad()
                 loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
                 loss.backward()
@@ -809,6 +822,10 @@ def _build_fair_comparison_metrics(
     warning_threshold_percent=80.0,
     baseline_accuracy=None,
     compressed_accuracy=None,
+    baseline_infer_resize_to=None,
+    compressed_infer_resize_to=None,
+    baseline_train_resize_to=None,
+    compressed_train_resize_to=None,
 ):
     """Run fair baseline/compressed benchmark and return comparison metrics.
 
@@ -870,6 +887,7 @@ def _build_fair_comparison_metrics(
         project_name=f"fair_{strategy_slug}_baseline_infer",
         output_dir=output_dir,
         max_batches=benchmark_infer_max_batches,
+        input_resize_to=baseline_infer_resize_to,
     )
 
     # Explicit cleanup to avoid baseline tensors inflating compressed power readings.
@@ -885,6 +903,7 @@ def _build_fair_comparison_metrics(
         project_name=f"fair_{strategy_slug}_compressed_infer",
         output_dir=output_dir,
         max_batches=compressed_infer_batches,
+        input_resize_to=compressed_infer_resize_to,
     )
 
     del compressed_eval_model
@@ -902,7 +921,13 @@ def _build_fair_comparison_metrics(
         output_dir=output_dir,
         epochs=benchmark_train_epochs,
         max_batches=benchmark_train_max_batches,
+        input_resize_to=baseline_train_resize_to,
     )
+
+    del baseline_train_model
+    if torch.cuda.is_available() and str(baseline_dev).startswith('cuda'):
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
     compressed_train_source = compressed_training_model if compressed_training_model is not None else compressed_model
     compressed_train_model = _safe_model_copy(compressed_train_source)
@@ -914,7 +939,13 @@ def _build_fair_comparison_metrics(
         output_dir=output_dir,
         epochs=benchmark_train_epochs,
         max_batches=compressed_train_batches,
+        input_resize_to=compressed_train_resize_to,
     )
+
+    del compressed_train_model
+    if torch.cuda.is_available() and str(compressed_dev).startswith('cuda'):
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
     if baseline_train_err:
         warnings.append(f"Baseline training benchmark fallback: {baseline_train_err}")
@@ -1100,7 +1131,14 @@ def _is_tensorrt_runtime_model(model):
     return any(m in module_name for m in markers) or any(m in class_name for m in markers)
 
 
-def _run_inference_pass(model, loader, dev, max_batches=None, static_batch_size=None):
+def _run_inference_pass(
+    model,
+    loader,
+    dev,
+    max_batches=None,
+    static_batch_size=None,
+    input_resize_to=None,
+):
     """Run one bounded inference pass and return (executed_batches, skipped_batches)."""
     executed_batches = 0
     skipped_batches = 0
@@ -1115,6 +1153,13 @@ def _run_inference_pass(model, loader, dev, max_batches=None, static_batch_size=
                 continue
 
             inputs = inputs.to(dev)
+            if input_resize_to is not None:
+                inputs = F.interpolate(
+                    inputs,
+                    size=int(input_resize_to),
+                    mode='bilinear',
+                    align_corners=False,
+                )
             _extract_logits(model(inputs))
             executed_batches += 1
 
@@ -1449,10 +1494,11 @@ def _shape_with_batch(input_shape, batch_size):
 
 
 def _select_trt_min_block_size(model_key):
-    """Use min_block_size=1 for all models so TensorRT compiles ResNet-style small
-    residual subgraphs (typically 1-2 ops) that would be skipped with block_size>=5.
-    This is critical for INT8 speedup on architectures with frequent skip connections."""
-    return 1
+    """Use smaller TRT partitions for lightweight models and coarser for heavy models."""
+    key = _slugify_name(model_key)
+    if key in LIGHTWEIGHT_MODEL_KEYS:
+        return 1
+    return 5
 
 
 def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32,
@@ -1764,26 +1810,14 @@ def apply_quantization(model, train_loader, test_loader, device,
     use_fp16_safeguard = model_key in LIGHTWEIGHT_MODEL_KEYS
     selected_precision = "fp16" if use_fp16_safeguard else "int8"
     runtime_precision = selected_precision
-    runtime_selection_policy = "default"
-    runtime_candidate_latencies_ms = {}
     batch_size_used = getattr(train_loader, 'batch_size', None)
     eval_batch_size = _get_loader_batch_size(
         test_loader,
         fallback=input_shape[0] if len(input_shape) > 0 else 1,
     )
-    # Latency is measured at batch_size=1 (per-sample) to correctly capture
-    # INT8 compute speedup. At batch=512 the RTX 5090 is already DRAM-bandwidth
-    # saturated for both FP32 and INT8 — the quantized model gains no visible
-    # advantage and may even appear slower due to quant/dequant overhead.
-    # Per-sample latency is the standard academic benchmark for inference speedup.
-    latency_input_shape = _shape_with_batch(input_shape, 1)
-    # TRT compile still uses the full eval batch for graph specialisation so
-    # the engine covers the production batch shape.
-    trt_compile_input_shape = _shape_with_batch(input_shape, eval_batch_size)
+    latency_input_shape = _shape_with_batch(input_shape, eval_batch_size)
+    trt_compile_input_shape = latency_input_shape
     trt_min_block_size = _select_trt_min_block_size(model_key)
-    alternate_tensorrt_model = None
-    alternate_runtime_backend = ""
-    alternate_tensorrt_precision_mode = ""
     hardware_state = (
         "Saturated (RTX 5090 Optimization Active)"
         if _is_rtx_5090(device=device)
@@ -1963,31 +1997,6 @@ def apply_quantization(model, train_loader, test_loader, device,
                             _cb("TensorRT export succeeded")
                         else:
                             _cb("TensorRT compiled; artifact save skipped")
-
-                        if tensorrt_precision_mode == "int8":
-                            try:
-                                _cb("Compiling FP16 TensorRT candidate for runtime selection...")
-                                (
-                                    alternate_tensorrt_model,
-                                    alternate_runtime_backend,
-                                    _alt_saved_trt_path,
-                                    alternate_tensorrt_precision_mode,
-                                ) = export_to_tensorrt(
-                                    _safe_model_copy(deployment_float_model),
-                                    trt_compile_input_shape,
-                                    tensorrt_engine_path,
-                                    prefer_int8=False,
-                                    min_block_size=trt_min_block_size,
-                                )
-                                _cb(
-                                    "Runtime candidate ready: "
-                                    f"{alternate_runtime_backend} ({alternate_tensorrt_precision_mode})"
-                                )
-                            except Exception as alt_trt_err:
-                                print(
-                                    "[Quantization] FP16 TensorRT candidate compile failed "
-                                    f"({type(alt_trt_err).__name__}): {alt_trt_err}"
-                                )
                     except Exception as trt_err:
                         print(f"[Quantization] TensorRT export failed ({type(trt_err).__name__}): {trt_err}")
                         tensorrt_model = None
@@ -2082,60 +2091,6 @@ def apply_quantization(model, train_loader, test_loader, device,
         if tensorrt_model is not None:
             benchmark_compressed_model = tensorrt_model
             runtime_precision = tensorrt_precision_mode or runtime_precision
-
-            runtime_candidates = [
-                (
-                    f"primary_{runtime_backend_used}_{runtime_precision}",
-                    benchmark_compressed_model,
-                    runtime_backend_used,
-                    runtime_precision,
-                )
-            ]
-            if alternate_tensorrt_model is not None:
-                runtime_candidates.append(
-                    (
-                        f"alternate_{alternate_runtime_backend}_{alternate_tensorrt_precision_mode}",
-                        alternate_tensorrt_model,
-                        alternate_runtime_backend,
-                        alternate_tensorrt_precision_mode,
-                    )
-                )
-
-            if len(runtime_candidates) > 1:
-                best_candidate = None
-                for candidate_label, candidate_model, candidate_backend, candidate_precision in runtime_candidates:
-                    try:
-                        candidate_latency = measure_latency(
-                            candidate_model,
-                            input_shape=latency_input_shape,
-                            dev=quant_eval_dev,
-                            n_runs=50,
-                        )
-                        runtime_candidate_latencies_ms[candidate_label] = candidate_latency
-                        if best_candidate is None or candidate_latency < best_candidate[4]:
-                            best_candidate = (
-                                candidate_label,
-                                candidate_model,
-                                candidate_backend,
-                                candidate_precision,
-                                candidate_latency,
-                            )
-                    except Exception as latency_err:
-                        print(
-                            f"[Quantization] Runtime candidate latency check failed for "
-                            f"{candidate_label}: {latency_err}"
-                        )
-
-                if best_candidate is not None:
-                    (
-                        _best_label,
-                        benchmark_compressed_model,
-                        runtime_backend_used,
-                        runtime_precision,
-                        _best_latency,
-                    ) = best_candidate
-                    tensorrt_precision_mode = runtime_precision
-                    runtime_selection_policy = "latency_best_of_trt"
         else:
             # Quantized torch kernels are CPU-only; use float fallback for GPU-side fair benchmarking.
             if use_fp16_safeguard:
@@ -2216,15 +2171,10 @@ def apply_quantization(model, train_loader, test_loader, device,
         baseline_size_mb=baseline_size,
         compressed_size_mb=quant_size,
         benchmark_train_epochs=max(1, min(3, fine_tune_epochs)),
-        # Scale benchmark batches by latency ratio: a faster compressed model should
-        # run proportionally fewer batches in the same wall-clock window, naturally
-        # producing less CO2. Cap at 20 for baseline, scale down for compressed.
         benchmark_train_max_batches=20,
         benchmark_infer_max_batches=40,
         baseline_accuracy=baseline_acc,
         compressed_accuracy=quant_acc,
-        # Pass measured latencies so the fair-comparison can weight batch counts
-        # proportionally — see latency_speedup_percent in returned metrics.
     )
 
     compressed_total_co2 = fair_metrics.get("compressed_benchmark_total_emissions_kg", 0.0)
@@ -2273,8 +2223,6 @@ def apply_quantization(model, train_loader, test_loader, device,
         "energy_measurement_method": "CodeCarbon / GPU-Specific Power Draw",
         "runtime_backend_used": runtime_backend_used,
         "runtime_precision": runtime_precision,
-        "runtime_selection_policy": runtime_selection_policy,
-        "runtime_candidate_latencies_ms": runtime_candidate_latencies_ms,
         "latency_batch_size_used": eval_batch_size,
         "tensorrt_engine_path": tensorrt_engine_path,
         "tensorrt_precision_mode": tensorrt_precision_mode,
@@ -2808,6 +2756,7 @@ def apply_kd(teacher, train_loader, test_loader, device,
     save_path, student_size = save_smallest_artifact(student, save_path, prefer_sparse=False)
     # Measure latency at the student's native 32×32 resolution
     student_input_shape = (1, input_shape[1], student_size_px, student_size_px)
+    kd_resize_to = student_size_px if needs_resize else None
     latency = measure_latency(student, input_shape=student_input_shape, dev=device)
 
     inference_emissions_kg, inference_energy_kwh, inference_duration_s = _track_inference_emissions(
@@ -2817,6 +2766,7 @@ def apply_kd(teacher, train_loader, test_loader, device,
         project_name=f"infer_{_slugify_name(model_name)}_kd",
         output_dir=save_dir,
         max_batches=None,
+        input_resize_to=kd_resize_to,
     )
 
     fair_metrics = _build_fair_comparison_metrics(
@@ -2838,6 +2788,8 @@ def apply_kd(teacher, train_loader, test_loader, device,
         benchmark_infer_max_batches=None,
         baseline_accuracy=teacher_acc,
         compressed_accuracy=student_acc,
+        compressed_infer_resize_to=kd_resize_to,
+        compressed_train_resize_to=kd_resize_to,
     )
 
     compressed_total_co2 = fair_metrics.get("compressed_benchmark_total_emissions_kg", 0.0)
@@ -3211,6 +3163,7 @@ def run_compression(model_name, method, dataset='CIFAR10',
     input_size = cfg['input_size']
     num_classes = 10 if dataset.upper() == 'CIFAR10' else 100
     total_params = PRELOADED_MODEL_TOTAL_PARAMS.get(model_key)
+    method_key = method.lower().strip()
 
     _cb = progress_cb or (lambda step, detail='': None)
 
@@ -3245,8 +3198,12 @@ def run_compression(model_name, method, dataset='CIFAR10',
     # the DataLoader from inheriting a CUDA context when workers are forked.
     print(f"  [Step 1/4] Loading {dataset} dataset (input {input_size}x{input_size})...")
     _cb('loading_data', f'Preparing {dataset} dataset ({input_size}x{input_size})...')
+    requested_batch_size = 128 if method_key == 'kd' else None
+    if requested_batch_size is not None:
+        print("  [KD Optimization] Using batch size 128 for stable distillation training.")
     train_loader, test_loader = get_data_loaders(
         dataset,
+        batch_size=requested_batch_size,
         input_size=input_size,
         total_params=total_params,
         model_key=model_key,
@@ -3360,7 +3317,7 @@ def run_compression(model_name, method, dataset='CIFAR10',
     def compress_cb(detail):
         _cb('compressing', detail)
 
-    method = method.lower().strip()
+    method = method_key
     if method == 'pruning':
         result = apply_pruning(model, train_loader, test_loader, device,
                                amount=0.70, fine_tune_epochs=max(10, fine_tune_epochs),
@@ -3382,7 +3339,7 @@ def run_compression(model_name, method, dataset='CIFAR10',
     elif method == 'kd':
         result = apply_kd(model, train_loader, test_loader, device,
                           num_classes=num_classes,
-                          epochs=fine_tune_epochs,
+                          epochs=max(20, fine_tune_epochs * 4),
                           save_dir=save_dir, progress_cb=compress_cb,
                           model_name=model_key,
                           accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
