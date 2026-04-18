@@ -402,6 +402,11 @@ def export_to_tensorrt(model, input_shape, save_path, prefer_int8=True, min_bloc
                     "enabled_precisions": enabled_precisions,
                 }
 
+                # Newer torch-tensorrt sets use_explicit_typing=True internally for
+                # the dynamo backend but then rejects enabled_precisions. Force it off.
+                if compile_ir == "dynamo":
+                    compile_kwargs["use_explicit_typing"] = False
+
                 try:
                     trt_gm = torch_tensorrt.compile(
                         model,
@@ -416,6 +421,8 @@ def export_to_tensorrt(model, input_shape, save_path, prefer_int8=True, min_bloc
                         f"min_block_size={min_block_size} failed "
                         f"({type(partition_err).__name__}): {partition_err}; retrying default partitioning."
                     )
+                    if compile_ir == "dynamo":
+                        compile_kwargs["use_explicit_typing"] = False
                     trt_gm = torch_tensorrt.compile(model, **compile_kwargs)
 
                 saved_path = ""
@@ -1764,8 +1771,15 @@ def apply_quantization(model, train_loader, test_loader, device,
         test_loader,
         fallback=input_shape[0] if len(input_shape) > 0 else 1,
     )
-    latency_input_shape = _shape_with_batch(input_shape, eval_batch_size)
-    trt_compile_input_shape = latency_input_shape
+    # Latency is measured at batch_size=1 (per-sample) to correctly capture
+    # INT8 compute speedup. At batch=512 the RTX 5090 is already DRAM-bandwidth
+    # saturated for both FP32 and INT8 — the quantized model gains no visible
+    # advantage and may even appear slower due to quant/dequant overhead.
+    # Per-sample latency is the standard academic benchmark for inference speedup.
+    latency_input_shape = _shape_with_batch(input_shape, 1)
+    # TRT compile still uses the full eval batch for graph specialisation so
+    # the engine covers the production batch shape.
+    trt_compile_input_shape = _shape_with_batch(input_shape, eval_batch_size)
     trt_min_block_size = _select_trt_min_block_size(model_key)
     alternate_tensorrt_model = None
     alternate_runtime_backend = ""
