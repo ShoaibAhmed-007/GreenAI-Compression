@@ -2679,9 +2679,12 @@ def run_compression(model_name, method, dataset='CIFAR10',
         tl_acc = evaluate(model, test_loader, dev=device)
         print(f"  Transfer-learn accuracy: {tl_acc}%")
     else:
+        # Pre-saved baseline — skip the full-set evaluation to avoid slow
+        # single-threaded 224x224 data loading before compression starts.
+        # The compression functions run their own evaluation internally.
         _cb('loading_data', 'Using pre-saved baseline — skipping transfer learning')
-        tl_acc = evaluate(model, test_loader, dev=device)
-        print(f"  Pre-saved baseline accuracy: {tl_acc}%")
+        tl_acc = None
+        print(f"  Pre-saved baseline loaded — skipping pre-compression eval, going straight to compression.")
     # ── End transfer learning ──────────────────────────────────────
 
     save_dir = os.path.join(os.path.dirname(__file__), '..', 'models', 'compressed')
