@@ -1788,7 +1788,7 @@ def apply_quantization(model, train_loader, test_loader, device,
     tensorrt_precision_mode = ""
     runtime_backend_used = "Torch Quantization (CPU kernels)"
     model_key = _slugify_name(model_name)
-    use_fp16_safeguard = any(arch in model_key for arch in ["mobilenet", "efficientnet", "shufflenet", "squeezenet", "mnasnet"])
+    use_fp16_safeguard = any(arch in model_key for arch in ["mobilenet", "efficientnet", "shufflenet", "squeezenet", "mnasnet", "densenet"])
     selected_precision = "fp16" if use_fp16_safeguard else "int8"
     runtime_precision = selected_precision
     runtime_selection_policy = "default"
