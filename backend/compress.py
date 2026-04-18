@@ -1414,15 +1414,18 @@ def _is_rtx_5090(device=None):
         return False
 
 
-def _select_target_batch_size(total_params=None, default_batch_size=128, device=None):
+def _select_target_batch_size(total_params=None, default_batch_size=128, device=None, input_size=32):
     """Select batch size using simple RTX 5090 saturation heuristics."""
     is_5090 = _is_rtx_5090(device=device)
     if not is_5090:
         return default_batch_size, is_5090
 
-    if total_params is not None and int(total_params) < RTX5090_SMALL_MODEL_PARAM_THRESHOLD:
-        return 1024, is_5090
-    return 512, is_5090
+    base_batch = 1024 if (total_params is not None and int(total_params) < RTX5090_SMALL_MODEL_PARAM_THRESHOLD) else 512
+    # MobileNet/ResNet models on 224x224 images take huge VRAM during QAT backprop.
+    if input_size >= 224:
+        base_batch = min(base_batch, 128)
+        
+    return base_batch, is_5090
 
 
 def _get_loader_batch_size(loader, fallback=1):
@@ -1479,6 +1482,7 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32,
         batch_size, is_5090 = _select_target_batch_size(
             total_params=total_params,
             default_batch_size=128,
+            input_size=input_size,
         )
         if is_5090:
             print(
