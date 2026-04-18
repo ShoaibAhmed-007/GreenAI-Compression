@@ -2567,11 +2567,20 @@ def run_compression(model_name, method, dataset='CIFAR10',
     print(f"Device: {device_label}")
     print(f"{'='*60}")
 
-    # Step 1: Load model — try pre-saved baseline first
-    pretrained_path = os.path.join(
-        os.path.dirname(__file__), '..', 'models', 'pretrained_baselines',
-        f'{model_key}_baseline.pth')
+    # Step 1: Load model — try pre-saved baseline first.
+    # Check both locations: models/pretrained_baselines/ AND models/ root.
+    _models_dir = os.path.join(os.path.dirname(__file__), '..', 'models')
+    pretrained_path = os.path.join(_models_dir, 'pretrained_baselines', f'{model_key}_baseline.pth')
+    if not os.path.exists(pretrained_path):
+        # Fallback: check directly in models/ root (e.g. models/resnet18_baseline.pth)
+        _fallback = os.path.join(_models_dir, f'{model_key}_baseline.pth')
+        if os.path.exists(_fallback):
+            pretrained_path = _fallback
     has_pretrained = os.path.exists(pretrained_path)
+    if has_pretrained:
+        print(f"  Found pre-saved baseline: {pretrained_path}")
+    else:
+        print(f"  No pre-saved baseline found — will transfer-learn from ImageNet.")
 
     # Step 2: Prepare dataset FIRST — before model.to(device) so that
     # CIFAR-10 files are read before CUDA is initialized. This prevents
@@ -2603,32 +2612,38 @@ def run_compression(model_name, method, dataset='CIFAR10',
         # baseline accuracy reflects actual performance on the target
         # dataset — otherwise it will be ≈10% (random).
         _cb('loading_data', 'Fine-tuning classifier head on target dataset...')
+        print(f"  [Step 3/4] Transfer-learning head (no pre-saved baseline found)...")
 
         # Phase A – freeze backbone, train only the new head (fast)
+        # Capped at 100 batches per epoch to avoid iterating all 50k images
+        # silently on a single thread with 224x224 resize.
         for p in model.parameters():
             p.requires_grad = False
         _enable_head_gradients(model, model_key)
 
         head_epochs = max(fine_tune_epochs, 3)
+        head_max_batches = 100
         optimizer_A = optim.Adam(
             filter(lambda p: p.requires_grad, model.parameters()),
             lr=1e-3, weight_decay=1e-4)
 
-        head_total_batches = len(train_loader)
         for ep in range(head_epochs):
-            _cb('loading_data',
-                f'Head fine-tune epoch {ep+1}/{head_epochs}...')
+            print(f"    [Phase A] Head fine-tune epoch {ep+1}/{head_epochs}...")
+            _cb('loading_data', f'Head fine-tune epoch {ep+1}/{head_epochs}...')
             model.train()
             for batch_idx, (inputs, labels) in enumerate(train_loader):
+                if batch_idx >= head_max_batches:
+                    break
                 inputs, labels = inputs.to(device), labels.to(device)
                 optimizer_A.zero_grad()
                 loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
                 loss.backward()
                 optimizer_A.step()
                 if (batch_idx + 1) % 20 == 0:
+                    print(f"      batch {batch_idx+1}/{head_max_batches} loss={loss.item():.4f}")
                     _cb('loading_data',
                         f'Head fine-tune epoch {ep+1}/{head_epochs} — '
-                        f'batch {batch_idx+1}/{head_total_batches}')
+                        f'batch {batch_idx+1}/{head_max_batches}')
 
         # Phase B – unfreeze all layers, fine-tune end-to-end with low LR
         for p in model.parameters():
@@ -2643,8 +2658,8 @@ def run_compression(model_name, method, dataset='CIFAR10',
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer_B, T_max=ft_epochs)
 
         for ep in range(ft_epochs):
-            _cb('loading_data',
-                f'Full fine-tune epoch {ep+1}/{ft_epochs}...')
+            print(f"    [Phase B] Full fine-tune epoch {ep+1}/{ft_epochs}...")
+            _cb('loading_data', f'Full fine-tune epoch {ep+1}/{ft_epochs}...')
             model.train()
             for batch_idx, (inputs, labels) in enumerate(train_loader):
                 if batch_idx >= max_batches_per_epoch:
@@ -2655,6 +2670,7 @@ def run_compression(model_name, method, dataset='CIFAR10',
                 loss.backward()
                 optimizer_B.step()
                 if (batch_idx + 1) % 10 == 0:
+                    print(f"      batch {batch_idx+1}/{effective_batches} loss={loss.item():.4f}")
                     _cb('loading_data',
                         f'Full fine-tune epoch {ep+1}/{ft_epochs} — '
                         f'batch {batch_idx+1}/{effective_batches}')
