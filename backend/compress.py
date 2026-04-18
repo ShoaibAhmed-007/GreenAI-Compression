@@ -117,11 +117,21 @@ def evaluate(model, loader, dev=None, max_batches=None):
             dev = next(model.parameters()).device
         except StopIteration:
             dev = torch.device('cpu')
+
+    use_half = False
+    try:
+        if next(model.parameters()).dtype == torch.float16:
+            use_half = True
+    except (StopIteration, TypeError, AttributeError):
+        pass
+
     with torch.no_grad():
         for batch_idx, (inputs, labels) in enumerate(loader):
             if max_batches is not None and batch_idx >= max_batches:
                 break
             inputs, labels = inputs.to(dev), labels.to(dev)
+            if use_half:
+                inputs = inputs.half()
             outputs = _extract_logits(model(inputs))
             _, predicted = outputs.max(1)
             total += labels.size(0)
@@ -1543,7 +1553,7 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32,
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=_num_workers, pin_memory=pin_memory, persistent_workers=_persistent)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
-                             num_workers=_num_workers, pin_memory=pin_memory, persistent_workers=_persistent)
+                             num_workers=_num_workers, pin_memory=pin_memory, persistent_workers=_persistent, drop_last=True)
     return train_loader, test_loader
 
 def apply_pruning(model, train_loader, test_loader, device,
