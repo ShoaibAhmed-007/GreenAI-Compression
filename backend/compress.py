@@ -1256,13 +1256,18 @@ def apply_pruning(model, train_loader, test_loader, device,
                                   weight_decay=5e-4)
 
             model.train()
-            for inputs, labels in train_loader:
+            for batch_idx, (inputs, labels) in enumerate(train_loader):
+                if batch_idx >= 100:
+                    break
                 inputs, labels = inputs.to(device), labels.to(device)
 
                 optimizer.zero_grad()
                 loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
                 loss.backward()
                 optimizer.step()
+                
+                if (batch_idx + 1) % 20 == 0:
+                    print(f'      batch {batch_idx+1}/100 loss={loss.item():.4f}')
 
         # Final fine-tuning after pruning (full dataset per epoch)
         _cb("Final fine-tuning after pruning...")
@@ -1276,13 +1281,18 @@ def apply_pruning(model, train_loader, test_loader, device,
 
         for epoch in range(fine_tune_epochs):
             model.train()
-            for inputs, labels in train_loader:
+            for batch_idx, (inputs, labels) in enumerate(train_loader):
+                if batch_idx >= 100:
+                    break
                 inputs, labels = inputs.to(device), labels.to(device)
 
                 optimizer.zero_grad()
                 loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
                 loss.backward()
                 optimizer.step()
+                
+                if (batch_idx + 1) % 20 == 0:
+                    print(f'      batch {batch_idx+1}/100 loss={loss.item():.4f}')
 
             # Full eval during training
             acc = evaluate(model, test_loader, dev=device)
@@ -1424,13 +1434,18 @@ def apply_quantization(model, train_loader, test_loader, device,
 
         for epoch in range(5):
             model.train()
-            for inputs, labels in train_loader:
+            for batch_idx, (inputs, labels) in enumerate(train_loader):
+                if batch_idx >= 100:
+                    break
                 inputs, labels = inputs.to(device), labels.to(device)
 
                 optimizer.zero_grad()
                 loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
                 loss.backward()
                 optimizer.step()
+                
+                if (batch_idx + 1) % 20 == 0:
+                    print(f'      batch {batch_idx+1}/100 loss={loss.item():.4f}')
 
             acc = evaluate(model, test_loader, dev=device)
             _cb(f"Pre-QAT Epoch {epoch+1} Accuracy: {acc:.2f}%")
@@ -1487,13 +1502,17 @@ def apply_quantization(model, train_loader, test_loader, device,
 
             for epoch in range(fine_tune_epochs):
                 model.train()
-                for inputs, labels in train_loader:
+                for batch_idx, (inputs, labels) in enumerate(train_loader):
+                    if batch_idx >= 100:
+                        break
                     inputs, labels = inputs.to(qat_dev), labels.to(qat_dev)
 
                     optimizer.zero_grad()
                     loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
                     loss.backward()
                     optimizer.step()
+                    if (batch_idx + 1) % 20 == 0:
+                        print(f'      batch {batch_idx+1}/100 loss={loss.item():.4f}')
 
                 acc = evaluate(model, test_loader, dev=qat_dev)
                 _cb(f"QAT Epoch {epoch+1}/{fine_tune_epochs} - Accuracy: {acc:.2f}%")
