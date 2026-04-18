@@ -1350,31 +1350,69 @@ def detect_num_classes(model):
     return 10
 
 
+RTX5090_SMALL_MODEL_PARAM_THRESHOLD = 5_000_000
+LIGHTWEIGHT_MODEL_KEYS = {
+    'shufflenet_v2',
+    'mobilenet_v2',
+    'squeezenet',
+    'efficientnet_b0',
+}
+
+
+def _is_rtx_5090(device=None):
+    """Check whether the active CUDA device is an RTX 5090."""
+    if not torch.cuda.is_available():
+        return False
+    try:
+        index = 0
+        if isinstance(device, torch.device) and device.type == 'cuda':
+            index = device.index if device.index is not None else 0
+        return "5090" in torch.cuda.get_device_name(index)
+    except Exception:
+        return False
+
+
+def _select_target_batch_size(total_params=None, default_batch_size=128, device=None):
+    """Select batch size using simple RTX 5090 saturation heuristics."""
+    is_5090 = _is_rtx_5090(device=device)
+    if not is_5090:
+        return default_batch_size, is_5090
+
+    if total_params is not None and int(total_params) < RTX5090_SMALL_MODEL_PARAM_THRESHOLD:
+        return 1024, is_5090
+    return 512, is_5090
+
+
 def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32,
-                     pin_memory=True, use_color_jitter=True):
+                     pin_memory=True, use_color_jitter=True,
+                     total_params=None, model_key='model'):
     """Get train/test DataLoaders for a given dataset name.
 
     Args:
         dataset_name: 'CIFAR10' or 'CIFAR100'
-        batch_size: Batch size for DataLoader.  When None (default) the size
-                    is chosen automatically based on input_size so that 8 GB
-                    VRAM is not exceeded:
-                        32  → 128
-                        224 → 32
-                        299 → 16
+        batch_size: Batch size for DataLoader. When None (default),
+                    hardware-aware logic is used:
+                        - RTX 5090 + light models (<5M params): 1024
+                        - RTX 5090 + heavier models: 512
+                        - Others: 128
         input_size: Spatial size to resize images to (default 32 = native CIFAR).
                     Pretrained ImageNet models typically need 224 or 299.
         pin_memory: Whether to use CUDA pinned memory (disable if OOM issues)
         use_color_jitter: Whether to apply lightweight color augmentation to train data.
+        total_params: Model parameter count used for hardware-aware batch scaling.
+        model_key: Identifier used for debug logging.
     """
-    # Auto-select batch size to keep GPU fed (optimized for RTX 5090 24GB)
+    # Auto-select batch size using hardware-aware RTX 5090 saturation logic.
     if batch_size is None:
-        if input_size <= 32:
-            batch_size = 256
-        elif input_size <= 224:
-            batch_size = 256
-        else:
-            batch_size = 64
+        batch_size, is_5090 = _select_target_batch_size(
+            total_params=total_params,
+            default_batch_size=128,
+        )
+        if is_5090:
+            print(
+                f"[RTX 5090 Optimization] {model_key}: "
+                f"using batch size {batch_size} for saturation."
+            )
 
     ds = dataset_name.upper()
 
@@ -1650,6 +1688,16 @@ def apply_quantization(model, train_loader, test_loader, device,
     tensorrt_engine_path = ""
     tensorrt_precision_mode = ""
     runtime_backend_used = "Torch Quantization (CPU kernels)"
+    model_key = _slugify_name(model_name)
+    use_fp16_safeguard = model_key in LIGHTWEIGHT_MODEL_KEYS
+    selected_precision = "fp16" if use_fp16_safeguard else "int8"
+    runtime_precision = selected_precision
+    batch_size_used = getattr(train_loader, 'batch_size', None)
+    hardware_state = (
+        "Saturated (RTX 5090 Optimization Active)"
+        if _is_rtx_5090(device=device)
+        else "Standard"
+    )
 
     training_tracker = _start_emissions_tracker(
         project_name=f"compress_{_slugify_name(model_name)}_quantization",
@@ -1692,152 +1740,204 @@ def apply_quantization(model, train_loader, test_loader, device,
         qat_api = _get_quantization_api()
         backend = _configure_quantized_backend()
         _cb(f"Using quantized backend: {backend}")
+        if use_fp16_safeguard:
+            _cb(
+                f"[Safety Guard] {model_name} detected as lightweight. "
+                "Pivoting runtime precision to FP16."
+            )
+        else:
+            _cb(f"[Safety Guard] {model_name} detected as heavy model. Using INT8 runtime target.")
 
         # --- Attempt 1: Full Quantization-Aware Training (QAT) ---
         qat_succeeded = False
-        try:
-            # Wrap model with QuantStub/DeQuantStub if it lacks native quant support.
-            # This prevents "input tensor dtype didn't match" errors on architectures
-            # without built-in quant/dequant stubs (DenseNet, EfficientNet, GoogLeNet, etc.)
-            QuantWrapper = getattr(qat_api, 'QuantWrapper',
-                                   getattr(torch.quantization, 'QuantWrapper', None))
-            needs_wrapper = not (hasattr(model, 'quant') and hasattr(model, 'dequant'))
-            if needs_wrapper and QuantWrapper is not None:
-                model = QuantWrapper(model)
-                _cb("Wrapped model with QuantStub/DeQuantStub for QAT compatibility")
+        ptsq_succeeded = False
 
-            if hasattr(model, 'fuse_model'):
-                model.fuse_model()
-
-            model.qconfig = qat_api.get_default_qat_qconfig(backend)
-            _call_quant_api_safely(qat_api.prepare_qat, model, inplace=True)
-
-            # Validation forward pass — catch incompatible architectures BEFORE
-            # wasting time on the full QAT training loop.
-            with torch.no_grad():
-                test_input = torch.randn(1, *input_shape[1:]).to(qat_dev)
-                model.eval()
-                _extract_logits(model(test_input))
-                model.train()
-            _cb("QAT preparation validated successfully")
-
-            # ✅ QAT TRAINING (CUDA when available)
-            _cb(f"Starting QAT training ({qat_dev})...")
-            optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
-            qat_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=max(1, fine_tune_epochs)
-            )
-
-            best_acc = 0
-            best_state = copy.deepcopy(model.state_dict())
-
-            for epoch in range(fine_tune_epochs):
-                model.train()
-                for batch_idx, (inputs, labels) in enumerate(train_loader):
-                    if batch_idx >= 100:
-                        break
-                    inputs, labels = inputs.to(qat_dev), labels.to(qat_dev)
-
-                    optimizer.zero_grad()
-                    loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
-                    loss.backward()
-                    optimizer.step()
-                    if (batch_idx + 1) % 20 == 0:
-                        print(f'      batch {batch_idx+1}/100 loss={loss.item():.4f}')
-
-                acc = evaluate(model, test_loader, dev=qat_dev)
-                _cb(f"QAT Epoch {epoch+1}/{fine_tune_epochs} - Accuracy: {acc:.2f}%")
-
-                if acc > best_acc:
-                    best_acc = acc
-                    best_state = copy.deepcopy(model.state_dict())
-                qat_scheduler.step()
-
-            model.load_state_dict(best_state)
+        if use_fp16_safeguard:
+            quantization_type = "fp16_safeguard"
             deployment_float_model = _prepare_deployment_float_model(model)
             fallback_float_model = _safe_model_copy(deployment_float_model).cpu().eval()
+            quantized_model = _safe_model_copy(fallback_float_model)
+            qat_succeeded = True
 
             if device.type == 'cuda':
                 tensorrt_engine_path = os.path.splitext(
-                    build_compressed_model_path(save_dir, model_name, 'qat_tensorrt')
+                    build_compressed_model_path(save_dir, model_name, 'fp16_tensorrt')
                 )[0] + '.ts'
                 try:
-                    _cb("Exporting QAT model to TensorRT (INT8 -> FP16/FP32 fallback)...")
+                    _cb("Exporting FP16 safeguard model to TensorRT...")
                     tensorrt_model, runtime_backend_used, saved_trt_path, tensorrt_precision_mode = export_to_tensorrt(
                         _safe_model_copy(deployment_float_model),
                         input_shape,
                         tensorrt_engine_path,
+                        prefer_int8=False,
                     )
                     tensorrt_engine_path = saved_trt_path
+                    runtime_precision = tensorrt_precision_mode or "fp16"
                     if tensorrt_engine_path:
                         _cb("TensorRT export succeeded")
                     else:
                         _cb("TensorRT compiled; artifact save skipped")
                 except Exception as trt_err:
-                    print(f"[Quantization] TensorRT export failed ({type(trt_err).__name__}): {trt_err}")
+                    print(f"[Quantization] FP16 TensorRT export failed ({type(trt_err).__name__}): {trt_err}")
                     tensorrt_model = None
                     tensorrt_engine_path = ""
                     tensorrt_precision_mode = ""
-                    runtime_backend_used = "Torch Quantization (CPU kernels)"
-                    _cb("TensorRT export failed; continuing with torch quantization path")
+                    runtime_backend_used = "CUDA FP16 fallback (TensorRT unavailable)"
+                    runtime_precision = "fp16"
+                    _cb("TensorRT export failed; continuing with FP16 fallback runtime")
+            else:
+                runtime_backend_used = "FP16 safeguard (CPU runtime)"
+                runtime_precision = "fp16"
 
-            # Convert to INT8 (CPU-only kernels)
-            _cb("Converting QAT model to INT8 on CPU...")
-            model.to(torch.device('cpu'))
-            model.eval()
-            _call_quant_api_safely(qat_api.convert, model, inplace=True)
-            quantized_model = model
-            quantization_type = "qat_int8"
-            qat_succeeded = True
-
-        except Exception as qat_err:
-            print(f"[Quantization] QAT failed ({type(qat_err).__name__}): {qat_err}")
-            _cb("QAT incompatible with this architecture, trying static quantization...")
-
-        # --- Attempt 2: Post-Training Static Quantization (PTSQ) ---
-        ptsq_succeeded = False
-        if not qat_succeeded:
+        else:
             try:
-                ptsq_dev = torch.device('cpu')
-                model_ptsq = copy.deepcopy(fallback_float_model).to(ptsq_dev)
-                model_ptsq.eval()
-
+                # Wrap model with QuantStub/DeQuantStub if it lacks native quant support.
+                # This prevents "input tensor dtype didn't match" errors on architectures
+                # without built-in quant/dequant stubs (DenseNet, EfficientNet, GoogLeNet, etc.)
                 QuantWrapper = getattr(qat_api, 'QuantWrapper',
                                        getattr(torch.quantization, 'QuantWrapper', None))
-                if QuantWrapper is not None:
-                    model_ptsq = QuantWrapper(model_ptsq)
+                needs_wrapper = not (hasattr(model, 'quant') and hasattr(model, 'dequant'))
+                if needs_wrapper and QuantWrapper is not None:
+                    model = QuantWrapper(model)
+                    _cb("Wrapped model with QuantStub/DeQuantStub for QAT compatibility")
 
-                if hasattr(model_ptsq, 'fuse_model'):
-                    model_ptsq.fuse_model()
+                if hasattr(model, 'fuse_model'):
+                    model.fuse_model()
 
-                model_ptsq.qconfig = qat_api.get_default_qconfig(backend)
-                _call_quant_api_safely(qat_api.prepare, model_ptsq, inplace=True)
+                model.qconfig = qat_api.get_default_qat_qconfig(backend)
+                _call_quant_api_safely(qat_api.prepare_qat, model, inplace=True)
 
-                # Calibrate with training data (observers collect activation statistics)
-                _cb("Calibrating static quantization on CPU (50 batches)...")
+                # Validation forward pass — catch incompatible architectures BEFORE
+                # wasting time on the full QAT training loop.
                 with torch.no_grad():
-                    for batch_idx, (inputs, _) in enumerate(train_loader):
-                        if batch_idx >= 50:
+                    test_input = torch.randn(1, *input_shape[1:]).to(qat_dev)
+                    model.eval()
+                    _extract_logits(model(test_input))
+                    model.train()
+                _cb("QAT preparation validated successfully")
+
+                # ✅ QAT TRAINING (CUDA when available)
+                _cb(f"Starting QAT training ({qat_dev})...")
+                optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
+                qat_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer, T_max=max(1, fine_tune_epochs)
+                )
+
+                best_acc = 0
+                best_state = copy.deepcopy(model.state_dict())
+
+                for epoch in range(fine_tune_epochs):
+                    model.train()
+                    for batch_idx, (inputs, labels) in enumerate(train_loader):
+                        if batch_idx >= 100:
                             break
-                        model_ptsq(inputs.to(ptsq_dev))
+                        inputs, labels = inputs.to(qat_dev), labels.to(qat_dev)
 
-                _call_quant_api_safely(qat_api.convert, model_ptsq, inplace=True)
-                quantized_model = model_ptsq
-                quantization_type = "ptsq_int8"
-                ptsq_succeeded = True
-                _cb("Post-Training Static Quantization succeeded")
+                        optimizer.zero_grad()
+                        loss = F.cross_entropy(_extract_logits(model(inputs)), labels)
+                        loss.backward()
+                        optimizer.step()
+                        if (batch_idx + 1) % 20 == 0:
+                            print(f'      batch {batch_idx+1}/100 loss={loss.item():.4f}')
 
-            except Exception as ptsq_err:
-                print(f"[Quantization] PTSQ also failed ({type(ptsq_err).__name__}): {ptsq_err}")
+                    acc = evaluate(model, test_loader, dev=qat_dev)
+                    _cb(f"QAT Epoch {epoch+1}/{fine_tune_epochs} - Accuracy: {acc:.2f}%")
 
-        # --- Attempt 3: Dynamic Quantization (always works) ---
-        if not qat_succeeded and not ptsq_succeeded:
-            _cb("Falling back to dynamic quantization (always compatible)...")
-            quantization_type = "dynamic_int8_fallback"
-            base_for_fallback = fallback_float_model if fallback_float_model is not None else model.cpu().eval()
-            quantized_model = torch.quantization.quantize_dynamic(
-                base_for_fallback, {nn.Linear}, dtype=torch.qint8
-            )
+                    if acc > best_acc:
+                        best_acc = acc
+                        best_state = copy.deepcopy(model.state_dict())
+                    qat_scheduler.step()
+
+                model.load_state_dict(best_state)
+                deployment_float_model = _prepare_deployment_float_model(model)
+                fallback_float_model = _safe_model_copy(deployment_float_model).cpu().eval()
+
+                if device.type == 'cuda':
+                    tensorrt_engine_path = os.path.splitext(
+                        build_compressed_model_path(save_dir, model_name, 'qat_tensorrt')
+                    )[0] + '.ts'
+                    try:
+                        _cb("Exporting QAT model to TensorRT (INT8 -> FP16/FP32 fallback)...")
+                        tensorrt_model, runtime_backend_used, saved_trt_path, tensorrt_precision_mode = export_to_tensorrt(
+                            _safe_model_copy(deployment_float_model),
+                            input_shape,
+                            tensorrt_engine_path,
+                            prefer_int8=(selected_precision == "int8"),
+                        )
+                        tensorrt_engine_path = saved_trt_path
+                        runtime_precision = tensorrt_precision_mode or selected_precision
+                        if tensorrt_engine_path:
+                            _cb("TensorRT export succeeded")
+                        else:
+                            _cb("TensorRT compiled; artifact save skipped")
+                    except Exception as trt_err:
+                        print(f"[Quantization] TensorRT export failed ({type(trt_err).__name__}): {trt_err}")
+                        tensorrt_model = None
+                        tensorrt_engine_path = ""
+                        tensorrt_precision_mode = ""
+                        runtime_backend_used = "Torch Quantization (CPU kernels)"
+                        runtime_precision = "int8_cpu"
+                        _cb("TensorRT export failed; continuing with torch quantization path")
+
+                # Convert to INT8 (CPU-only kernels)
+                _cb("Converting QAT model to INT8 on CPU...")
+                model.to(torch.device('cpu'))
+                model.eval()
+                _call_quant_api_safely(qat_api.convert, model, inplace=True)
+                quantized_model = model
+                quantization_type = "qat_int8"
+                runtime_precision = "int8"
+                qat_succeeded = True
+
+            except Exception as qat_err:
+                print(f"[Quantization] QAT failed ({type(qat_err).__name__}): {qat_err}")
+                _cb("QAT incompatible with this architecture, trying static quantization...")
+
+            # --- Attempt 2: Post-Training Static Quantization (PTSQ) ---
+            if not qat_succeeded:
+                try:
+                    ptsq_dev = torch.device('cpu')
+                    model_ptsq = copy.deepcopy(fallback_float_model).to(ptsq_dev)
+                    model_ptsq.eval()
+
+                    QuantWrapper = getattr(qat_api, 'QuantWrapper',
+                                           getattr(torch.quantization, 'QuantWrapper', None))
+                    if QuantWrapper is not None:
+                        model_ptsq = QuantWrapper(model_ptsq)
+
+                    if hasattr(model_ptsq, 'fuse_model'):
+                        model_ptsq.fuse_model()
+
+                    model_ptsq.qconfig = qat_api.get_default_qconfig(backend)
+                    _call_quant_api_safely(qat_api.prepare, model_ptsq, inplace=True)
+
+                    # Calibrate with training data (observers collect activation statistics)
+                    _cb("Calibrating static quantization on CPU (50 batches)...")
+                    with torch.no_grad():
+                        for batch_idx, (inputs, _) in enumerate(train_loader):
+                            if batch_idx >= 50:
+                                break
+                            model_ptsq(inputs.to(ptsq_dev))
+
+                    _call_quant_api_safely(qat_api.convert, model_ptsq, inplace=True)
+                    quantized_model = model_ptsq
+                    quantization_type = "ptsq_int8"
+                    runtime_precision = "int8"
+                    ptsq_succeeded = True
+                    _cb("Post-Training Static Quantization succeeded")
+
+                except Exception as ptsq_err:
+                    print(f"[Quantization] PTSQ also failed ({type(ptsq_err).__name__}): {ptsq_err}")
+
+            # --- Attempt 3: Dynamic Quantization (always works) ---
+            if not qat_succeeded and not ptsq_succeeded:
+                _cb("Falling back to dynamic quantization (always compatible)...")
+                quantization_type = "dynamic_int8_fallback"
+                base_for_fallback = fallback_float_model if fallback_float_model is not None else model.cpu().eval()
+                quantized_model = torch.quantization.quantize_dynamic(
+                    base_for_fallback, {nn.Linear}, dtype=torch.qint8
+                )
+                runtime_precision = "int8"
 
         # ✅ Save
         save_path = build_compressed_model_path(save_dir, model_name, 'quantized')
@@ -1845,7 +1945,7 @@ def apply_quantization(model, train_loader, test_loader, device,
             quantized_model,
             save_path,
             prefer_sparse=False,
-            include_fp16_variant=False,
+            include_fp16_variant=use_fp16_safeguard,
         )
     finally:
         training_emissions_kg, training_energy_kwh, training_duration_s = _finalize_emissions_tracking(
@@ -1863,35 +1963,59 @@ def apply_quantization(model, train_loader, test_loader, device,
     if quant_eval_dev.type == 'cuda':
         if tensorrt_model is not None:
             benchmark_compressed_model = tensorrt_model
+            runtime_precision = tensorrt_precision_mode or runtime_precision
         else:
             # Quantized torch kernels are CPU-only; use float fallback for GPU-side fair benchmarking.
-            benchmark_compressed_model = (
-                copy.deepcopy(fallback_float_model).to(quant_eval_dev).eval()
-                if fallback_float_model is not None else copy.deepcopy(model).to(quant_eval_dev).eval()
-            )
-            runtime_backend_used = "CUDA FP32 fallback (TensorRT unavailable)"
+            if use_fp16_safeguard:
+                benchmark_compressed_model = (
+                    copy.deepcopy(fallback_float_model).half().to(quant_eval_dev).eval()
+                    if fallback_float_model is not None else copy.deepcopy(model).half().to(quant_eval_dev).eval()
+                )
+                runtime_backend_used = "CUDA FP16 fallback (TensorRT unavailable)"
+                runtime_precision = "fp16"
+            else:
+                benchmark_compressed_model = (
+                    copy.deepcopy(fallback_float_model).to(quant_eval_dev).eval()
+                    if fallback_float_model is not None else copy.deepcopy(model).to(quant_eval_dev).eval()
+                )
+                runtime_backend_used = "CUDA FP32 fallback (TensorRT unavailable)"
+                runtime_precision = "fp32"
 
     try:
         quant_acc = evaluate(benchmark_compressed_model, test_loader, dev=quant_eval_dev)
     except Exception as e:
-        print(f"[Quantization] Runtime fallback to dynamic quantization: {e}")
-        quantization_type = "dynamic_int8_fallback_runtime"
-        base_for_fallback = fallback_float_model if fallback_float_model is not None else model.cpu().eval()
-        quantized_model = torch.quantization.quantize_dynamic(
-            base_for_fallback, {nn.Linear}, dtype=torch.qint8
-        )
-        save_path, quant_size = save_smallest_artifact(
-            quantized_model,
-            save_path,
-            prefer_sparse=False,
-            include_fp16_variant=False,
-        )
-        if quant_eval_dev.type == 'cuda':
-            benchmark_compressed_model = copy.deepcopy(base_for_fallback).to(quant_eval_dev).eval()
-            runtime_backend_used = "CUDA FP32 fallback (dynamic runtime)"
+        if use_fp16_safeguard:
+            print(f"[Quantization] Runtime fallback to FP16 safeguard: {e}")
+            base_for_fallback = fallback_float_model if fallback_float_model is not None else model.cpu().eval()
+            if quant_eval_dev.type == 'cuda':
+                benchmark_compressed_model = copy.deepcopy(base_for_fallback).half().to(quant_eval_dev).eval()
+                runtime_backend_used = "CUDA FP16 fallback (runtime guard)"
+                runtime_precision = "fp16"
+            else:
+                benchmark_compressed_model = base_for_fallback
+                runtime_backend_used = "FP16 safeguard (CPU runtime)"
+                runtime_precision = "fp16"
         else:
-            benchmark_compressed_model = quantized_model
-            runtime_backend_used = "Torch Quantization (dynamic CPU fallback)"
+            print(f"[Quantization] Runtime fallback to dynamic quantization: {e}")
+            quantization_type = "dynamic_int8_fallback_runtime"
+            base_for_fallback = fallback_float_model if fallback_float_model is not None else model.cpu().eval()
+            quantized_model = torch.quantization.quantize_dynamic(
+                base_for_fallback, {nn.Linear}, dtype=torch.qint8
+            )
+            save_path, quant_size = save_smallest_artifact(
+                quantized_model,
+                save_path,
+                prefer_sparse=False,
+                include_fp16_variant=False,
+            )
+            if quant_eval_dev.type == 'cuda':
+                benchmark_compressed_model = copy.deepcopy(base_for_fallback).to(quant_eval_dev).eval()
+                runtime_backend_used = "CUDA FP32 fallback (dynamic runtime)"
+                runtime_precision = "fp32"
+            else:
+                benchmark_compressed_model = quantized_model
+                runtime_backend_used = "Torch Quantization (dynamic CPU fallback)"
+                runtime_precision = "int8"
         quant_acc = evaluate(benchmark_compressed_model, test_loader, dev=quant_eval_dev)
     latency = measure_latency(benchmark_compressed_model, input_shape=input_shape, dev=quant_eval_dev)
 
@@ -1971,8 +2095,11 @@ def apply_quantization(model, train_loader, test_loader, device,
         "hardware_target": "NVIDIA RTX 5090",
         "energy_measurement_method": "CodeCarbon / GPU-Specific Power Draw",
         "runtime_backend_used": runtime_backend_used,
+        "runtime_precision": runtime_precision,
         "tensorrt_engine_path": tensorrt_engine_path,
         "tensorrt_precision_mode": tensorrt_precision_mode,
+        "batch_size_used": batch_size_used,
+        "hardware_state": hardware_state,
         "acceleration_backend": runtime_backend_used,
         "saved_path": save_path,
     }
@@ -2769,6 +2896,21 @@ PRELOADED_MODELS = {
 }
 
 
+PRELOADED_MODEL_TOTAL_PARAMS = {
+    'resnet18': 11181642,
+    'resnet34': 21289802,
+    'mobilenet_v2': 2236682,
+    'efficientnet_b0': 4020358,
+    'efficientnet_b1': 6525994,
+    'densenet121': 6964106,
+    'densenet169': 12501130,
+    'squeezenet': 727626,
+    'shufflenet_v2': 1263854,
+    'inception_v3': 21806058,
+    'googlenet': 5610154,
+}
+
+
 def get_pretrained_model(model_key, num_classes=10):
     """
     Load a pretrained model from torchvision with ImageNet weights
@@ -2887,6 +3029,7 @@ def run_compression(model_name, method, dataset='CIFAR10',
     cfg = PRELOADED_MODELS[model_key]
     input_size = cfg['input_size']
     num_classes = 10 if dataset.upper() == 'CIFAR10' else 100
+    total_params = PRELOADED_MODEL_TOTAL_PARAMS.get(model_key)
 
     _cb = progress_cb or (lambda step, detail='': None)
 
@@ -2921,8 +3064,13 @@ def run_compression(model_name, method, dataset='CIFAR10',
     # the DataLoader from inheriting a CUDA context when workers are forked.
     print(f"  [Step 1/4] Loading {dataset} dataset (input {input_size}x{input_size})...")
     _cb('loading_data', f'Preparing {dataset} dataset ({input_size}x{input_size})...')
-    train_loader, test_loader = get_data_loaders(dataset, input_size=input_size)
-    print(f"  [Step 1/4] Dataset ready.")
+    train_loader, test_loader = get_data_loaders(
+        dataset,
+        input_size=input_size,
+        total_params=total_params,
+        model_key=model_key,
+    )
+    print(f"  [Step 1/4] Dataset ready (batch_size={train_loader.batch_size}).")
 
     # Step 2 (was Step 1): Load model weights onto GPU
     print(f"  [Step 2/4] Loading {cfg['name']} weights onto {device_label}...")
