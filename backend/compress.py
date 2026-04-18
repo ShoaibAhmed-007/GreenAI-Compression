@@ -406,9 +406,22 @@ def export_to_tensorrt(model, input_shape, save_path, prefer_int8=True, min_bloc
         precision_compiled = False
         for compile_ir in compile_irs:
             try:
+                # Dynamic batch size support for latency testing (batch=1) vs eval (batch=N)
+                if input_shape[0] > 1:
+                    min_shape = (1,) + tuple(input_shape)[1:]
+                    max_shape = tuple(input_shape)
+                    trt_input = torch_tensorrt.Input(
+                        min_shape=min_shape,
+                        opt_shape=max_shape,
+                        max_shape=max_shape,
+                        dtype=torch.float32
+                    )
+                else:
+                    trt_input = torch_tensorrt.Input(shape=tuple(input_shape), dtype=torch.float32)
+
                 compile_kwargs = {
                     "ir": compile_ir,
-                    "inputs": [torch_tensorrt.Input(shape=tuple(input_shape), dtype=torch.float32)],
+                    "inputs": [trt_input],
                     "enabled_precisions": enabled_precisions,
                 }
 
