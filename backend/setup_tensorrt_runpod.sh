@@ -8,8 +8,10 @@ set -euo pipefail
 #   ./setup_tensorrt_runpod.sh
 
 export PYTHONUNBUFFERED=1
+TRT_VER="10.15.1.29"
+TORCH_TRT_VER="2.11.0+cu128"
 
-echo "[1/5] Inspect runtime"
+echo "[1/6] Inspect runtime"
 python - <<'PY'
 import torch
 import platform
@@ -20,24 +22,86 @@ if torch.cuda.is_available():
     print(f"CUDA device: {torch.cuda.get_device_name(0)}")
 PY
 
-echo "[2/5] Upgrade packaging tools"
+echo "[2/6] Upgrade packaging tools"
 python -m pip install --upgrade pip setuptools wheel packaging
 
-echo "[3/5] Install TensorRT and Torch-TensorRT"
-python -m pip install --upgrade --extra-index-url https://pypi.nvidia.com \
-  tensorrt-cu12 \
-  tensorrt-cu12-bindings \
-  tensorrt-cu12-libs \
-  torch-tensorrt
+echo "[3/6] Install TensorRT and Torch-TensorRT (pinned compatible versions)"
+python -m pip uninstall -y \
+    torch-tensorrt \
+    tensorrt \
+    tensorrt-cu12 \
+    tensorrt-cu12-bindings \
+    tensorrt-cu12-libs \
+    tensorrt-cu13 \
+    tensorrt-cu13-bindings \
+    tensorrt-cu13-libs >/dev/null 2>&1 || true
 
-echo "[4/5] Install modelopt (required for TensorRT INT8)"
+python -m pip install --upgrade --extra-index-url https://pypi.nvidia.com \
+    "tensorrt-cu12==${TRT_VER}" \
+    "tensorrt-cu12-bindings==${TRT_VER}" \
+    "tensorrt-cu12-libs==${TRT_VER}" \
+    "torch-tensorrt==${TORCH_TRT_VER}"
+
+echo "[4/6] Install modelopt (required for TensorRT INT8)"
 python -m pip install --upgrade --extra-index-url https://pypi.nvidia.com nvidia-modelopt
 
-echo "[5/5] Verify TensorRT compile (INT8 -> FP16 -> FP32 fallback)"
+echo "[5/6] Export runtime library paths for torch_tensorrt"
+export LD_LIBRARY_PATH="$(python - <<'PY'
+import os
+import site
+
+paths = []
+for root in site.getsitepackages():
+    for rel in (
+        "tensorrt_libs",
+        os.path.join("tensorrt_libs", "lib"),
+        os.path.join("torch_tensorrt", "lib"),
+        os.path.join("nvidia", "cudnn", "lib"),
+        os.path.join("nvidia", "cublas", "lib"),
+        os.path.join("nvidia", "cuda_runtime", "lib"),
+        os.path.join("nvidia", "cusolver", "lib"),
+        os.path.join("nvidia", "cusparse", "lib"),
+        os.path.join("nvidia", "cufft", "lib"),
+        os.path.join("nvidia", "curand", "lib"),
+        os.path.join("nvidia", "nvjitlink", "lib"),
+        os.path.join("nvidia", "nvtx", "lib"),
+    ):
+        candidate = os.path.join(root, rel)
+        if os.path.isdir(candidate):
+            paths.append(candidate)
+
+seen = set()
+ordered_paths = []
+for path in paths:
+    if path not in seen:
+        seen.add(path)
+        ordered_paths.append(path)
+
+print(":".join(ordered_paths))
+PY
+):${LD_LIBRARY_PATH:-}"
+
+echo "[6/6] Verify TensorRT compile (INT8 -> FP16 -> FP32 fallback)"
 python - <<'PY'
 import importlib.util
 import time
 import torch
+import ctypes
+import glob
+import os
+import site
+
+matches = []
+for root in site.getsitepackages():
+    matches.extend(glob.glob(os.path.join(root, "torch_tensorrt", "lib", "libtorchtrt.so")))
+
+if not matches:
+    raise SystemExit("Could not find libtorchtrt.so under site-packages.")
+
+try:
+    ctypes.CDLL(matches[0])
+except OSError as exc:
+    raise SystemExit(f"libtorchtrt.so could not be loaded ({matches[0]}): {exc}")
 
 try:
     import torch_tensorrt
