@@ -1136,14 +1136,14 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32,
         pin_memory: Whether to use CUDA pinned memory (disable if OOM issues)
         use_color_jitter: Whether to apply lightweight color augmentation to train data.
     """
-    # Auto-select batch size to prevent GPU OOM on 8 GB cards
+    # Auto-select batch size to keep GPU fed (optimized for RTX 5090 24GB)
     if batch_size is None:
         if input_size <= 32:
-            batch_size = 128
+            batch_size = 256
         elif input_size <= 224:
-            batch_size = 32
+            batch_size = 256
         else:
-            batch_size = 16
+            batch_size = 64
 
     ds = dataset_name.upper()
 
@@ -1189,14 +1189,15 @@ def get_data_loaders(dataset_name='CIFAR10', batch_size=None, input_size=32,
     train_ds = DSClass(root=data_root, train=True, download=True, transform=transform_train)
     test_ds = DSClass(root=data_root, train=False, download=True, transform=transform_test)
 
-    # num_workers=0: avoids CUDA context fork deadlocks on new GPU drivers
-    # (RTX 5090 / CUDA 12.x). Workers inherit the CUDA context after
-    # model.to(device) and deadlock. Single-thread loading is fast enough
-    # now that NumPy 1.x is installed (no pickle hang).
+    # Use 8 multiprocessing workers on Linux to parallelize CPU image resizing (224x224) 
+    # to feed enormous fast GPUs like RTX 5090. If on Windows, use 0 to prevent 
+    # spawn-based deadlocks in the PyTorch dataloader.
+    import platform
+    _num_workers = 8 if platform.system() != 'Windows' else 0
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=0, pin_memory=pin_memory)
+                              num_workers=_num_workers, pin_memory=pin_memory)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
-                             num_workers=0, pin_memory=pin_memory)
+                             num_workers=_num_workers, pin_memory=pin_memory)
     return train_loader, test_loader
 
 def apply_pruning(model, train_loader, test_loader, device,
