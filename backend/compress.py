@@ -30,6 +30,11 @@ import os
 import json
 import re
 import argparse
+import multiprocessing
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
 
 # Enable cuDNN auto-tuner for faster convolutions with fixed input sizes
 torch.backends.cudnn.benchmark = True
