@@ -1,0 +1,404 @@
+specification {
+  element actor
+  element system
+  element component
+  element datastore
+  element api
+
+  relationship uses
+  relationship triggers
+  relationship stores
+  relationship reads
+  relationship returns
+}
+
+model {
+
+  actor user 'User / ML Engineer' {
+    description 'Prepares baselines, triggers compression, monitors emissions and dashboard'
+  }
+
+  system frontend 'Next.js Frontend' {
+    description 'Dashboard, charts, compression dialog, image-level comparison UI'
+
+    component dashboard 'Dashboard Page (page.tsx)' {
+      description 'Orchestrates baselines, history, charts, and compression dialog flows'
+    }
+    component apiLayer 'API Layer (api.ts)' {
+      description 'Normalizes dynamic results, maps into chart/table strategy structures'
+    }
+    component energySection 'Energy Section (EnergySection.tsx)' {
+      description 'Prefers immutable baseline training CO2 fields when available'
+    }
+  }
+
+  system backend 'FastAPI Backend' {
+    description 'Core pipeline: training, preparation, compression, normalization, history, comparison'
+
+    api baselines_api 'GET /api/baselines' {
+      description 'Returns all trained baseline model results from training_results_all.json'
+    }
+    api prepare_api 'POST /api/prepare' {
+      description 'Triggers fast pretrained-weight preparation via prepare_models.py'
+    }
+    api prepare_status 'GET /api/prepare/status' {
+      description 'Polls in-memory task state for active preparation job'
+    }
+    api compress_preloaded 'POST /api/compress/preloaded' {
+      description 'Curated compression on one of the 11 supported preloaded CNN baselines'
+    }
+    api compress_preloaded_status 'GET /api/compress/preloaded/status' {
+      description 'Polls in-memory task state for active preloaded compression job'
+    }
+    api compress_dynamic 'POST /api/compress/dynamic' {
+      description 'Compression on user-uploaded custom model artifacts'
+    }
+    api compress_dynamic_status 'GET /api/compress/dynamic/status' {
+      description 'Polls in-memory task state for active dynamic compression job'
+    }
+    api compress_legacy 'POST /api/compress (410)' {
+      description 'Intentionally deprecated. Returns 410 Gone'
+    }
+    api history_api 'GET /api/compression-history' {
+      description 'Returns normalized model-key-consistent compression history'
+    }
+    api dashboard_api 'GET /api/dashboard' {
+      description 'Aggregated baselines and history for frontend dashboard'
+    }
+    api compare_api 'GET /api/compare' {
+      description 'Multi-model aggregated comparison payload'
+    }
+    api model_compare_options 'GET /api/model-comparison/options' {
+      description 'Returns available baseline and compressed model pairs'
+    }
+    api model_compare 'POST /api/model-comparison/compare' {
+      description 'Runs baseline vs compressed inference on local Assets images'
+    }
+
+    component trainer 'train.py' {
+      description 'Full CIFAR training for 11 CNN baselines. Writes per-model results and merges into training_results_all'
+    }
+    component preparer 'prepare_models.py' {
+      description 'Fast pretrained-weight baseline preparation without full training'
+    }
+    component compressor 'compress.py' {
+      description 'Applies selected compression method. Tracks accuracy, size, latency, energy, CO2'
+    }
+    component pruning 'Pruning Method' {
+      description 'Iterative unstructured pruning with fine-tuning and best-artifact saving'
+    }
+    component quantization 'Quantization Method' {
+      description 'QAT and static quantization paths with environment-aware fallback'
+    }
+    component hybrid 'Hybrid Method' {
+      description 'Prune then retrain then quantize sequential pipeline'
+    }
+    component kd 'Knowledge Distillation' {
+      description 'Teacher-to-compact-student distillation for model size reduction'
+    }
+    component normalizer 'Result Normalizer' {
+      description 'Normalizes every compression result before saving and serving. Baseline emissions are immutable reference fields'
+    }
+    component taskState 'Task State Manager' {
+      description 'Global in-memory state. One active slot per task type: prepare, preloaded, dynamic'
+    }
+  }
+
+  system storage 'Artifacts and Results Store' {
+    description 'All persisted model checkpoints, compressed artifacts, and result JSONs on disk'
+
+    datastore baseline_checkpoints 'Baseline Checkpoints' {
+      description 'models/ and models/pretrained_baselines/ for all 11 CNN architectures'
+    }
+   
+    datastore compressed_models 'Compressed Models' {
+      description 'models/compressed/ and upload subpaths — output artifacts from all compression methods'
+    }
+    datastore training_results_all 'training_results_all.json' {
+      description 'Aggregated baseline training summary merged incrementally'
+    }
+    datastore per_model_results '*_training_result.json' {
+      description 'Per-model baseline training result files under results/'
+    }
+    datastore compression_history 'compression_history.json' {
+      description 'Normalized compression history. Source of truth keyed by model'
+    }
+    datastore preloaded_snapshot 'preloaded_compression_result.json' {
+      description 'Latest preloaded-run result snapshot'
+    }
+  
+    datastore assets 'Local Assets Images' {
+      description 'On-disk images used for image-level inference comparison'
+    }
+  }
+
+  // User -> Frontend
+  user -> frontend.dashboard 'Views dashboard and triggers compression'
+
+  // Frontend internal
+  frontend.dashboard -> frontend.apiLayer 'Calls'
+  frontend.apiLayer -> frontend.energySection 'Passes CO2 fields'
+
+  // Frontend -> Backend APIs
+  frontend.apiLayer -> backend.baselines_api 'GET baselines'
+  frontend.apiLayer -> backend.prepare_api 'POST prepare'
+  frontend.apiLayer -> backend.prepare_status 'GET prepare status'
+  frontend.apiLayer -> backend.compress_preloaded 'POST compress preloaded'
+  frontend.apiLayer -> backend.compress_preloaded_status 'GET preloaded status'
+  frontend.apiLayer -> backend.compress_dynamic 'POST compress dynamic'
+  frontend.apiLayer -> backend.compress_dynamic_status 'GET dynamic status'
+  frontend.apiLayer -> backend.history_api 'GET compression history'
+  frontend.apiLayer -> backend.dashboard_api 'GET dashboard data'
+  frontend.apiLayer -> backend.compare_api 'GET compare'
+  frontend.apiLayer -> backend.model_compare_options 'GET comparison options'
+  frontend.apiLayer -> backend.model_compare 'POST model comparison'
+
+  // APIs -> Task State
+  backend.prepare_api -> backend.taskState 'Reads and writes prepare slot'
+  backend.prepare_status -> backend.taskState 'Polls prepare slot'
+  backend.compress_preloaded -> backend.taskState 'Reads and writes preloaded slot'
+  backend.compress_preloaded_status -> backend.taskState 'Polls preloaded slot'
+  backend.compress_dynamic -> backend.taskState 'Reads and writes dynamic slot'
+  backend.compress_dynamic_status -> backend.taskState 'Polls dynamic slot'
+
+  // APIs -> Core Components
+  backend.baselines_api -> storage.training_results_all 'Reads'
+  backend.prepare_api -> backend.preparer 'Delegates to'
+  backend.compress_preloaded -> backend.compressor 'Delegates to'
+  backend.compress_dynamic -> backend.compressor 'Delegates to'
+  backend.history_api -> backend.normalizer 'Returns normalized history via'
+  backend.dashboard_api -> backend.normalizer 'Aggregates via'
+  backend.compare_api -> backend.normalizer 'Reads via'
+  backend.model_compare -> backend.normalizer 'Normalizes inference result via'
+  backend.model_compare -> storage.assets 'Loads images for inference'
+  backend.model_compare -> storage.baseline_checkpoints 'Loads baseline model'
+  backend.model_compare -> storage.compressed_models 'Loads compressed model'
+  backend.model_compare_options -> storage.baseline_checkpoints 'Enumerates available models'
+  backend.model_compare_options -> storage.compressed_models 'Enumerates compressed variants'
+
+  // Compressor -> Methods
+  backend.compressor -> backend.pruning 'Dispatches to'
+  backend.compressor -> backend.quantization 'Dispatches to'
+  backend.compressor -> backend.hybrid 'Dispatches to'
+  backend.compressor -> backend.kd 'Dispatches to'
+
+  // Compressor -> Storage
+  backend.compressor -> storage.compressed_models 'Saves compressed artifacts'
+  backend.compressor -> storage.uploaded_models 'Reads user-uploaded model'
+  backend.compressor -> storage.preloaded_snapshot 'Overwrites latest preloaded snapshot'
+  backend.compressor -> storage.dynamic_snapshot 'Overwrites latest dynamic snapshot'
+  backend.compressor -> backend.normalizer 'Passes result for normalization'
+
+  // Trainer and Preparer -> Storage
+  backend.trainer -> storage.baseline_checkpoints 'Saves checkpoint per model'
+  backend.trainer -> storage.per_model_results 'Writes per-model training result'
+  backend.trainer -> storage.training_results_all 'Merges into aggregated summary'
+  backend.preparer -> storage.baseline_checkpoints 'Saves pretrained weights'
+  backend.preparer -> storage.training_results_all 'Updates aggregated summary'
+
+  // Normalizer -> Storage
+  backend.normalizer -> storage.compression_history 'Reads and re-writes normalized history'
+  backend.normalizer -> storage.training_results_all 'Reads baseline emissions as immutable reference'
+
+  // Dataset access
+  backend.trainer -> storage.assets 'Loads CIFAR data via torchvision'
+  backend.preparer -> storage.assets 'Loads CIFAR data for evaluation'
+  backend.compressor -> storage.assets 'Loads CIFAR data for fine-tuning and eval'
+
+}
+
+views {
+
+  view index {
+    title 'Green AI Pipeline — Full System Overview'
+    include *
+    style * {
+      color secondary
+    }
+    style user {
+      color green
+      shape person
+    }
+    style frontend {
+      color blue
+    }
+    style backend {
+      color amber
+    }
+    style storage {
+      color muted
+    }
+  }
+
+  view frontend_view of frontend {
+    title 'Frontend Internals'
+    include *
+    include user
+    include backend.baselines_api
+    include backend.prepare_api, backend.prepare_status
+    include backend.compress_preloaded, backend.compress_preloaded_status
+    include backend.compress_dynamic, backend.compress_dynamic_status
+    include backend.history_api, backend.dashboard_api
+    include backend.compare_api, backend.model_compare
+    style * {
+      color blue
+    }
+    style user {
+      color green
+      shape person
+    }
+  }
+
+  view backend_view of backend {
+    title 'Backend Pipeline — APIs, Components, and Storage'
+    include *
+    include storage.*
+    style * {
+      color amber
+    }
+    style storage {
+      color muted
+    }
+    style backend.normalizer {
+      color green
+    }
+    style backend.taskState {
+      color sky
+    }
+  }
+
+  view compression_flow {
+    title 'Compression Workflow — End to End'
+    include user
+    include frontend.dashboard, frontend.apiLayer
+    include backend.compress_preloaded, backend.compress_preloaded_status
+    
+    include backend.taskState
+    include backend.compressor
+    include backend.pruning, backend.quantization
+    include backend.hybrid, backend.kd
+    include backend.normalizer
+    include storage.compressed_models, storage.uploaded_models
+    include storage.preloaded_snapshot, storage.dynamic_snapshot
+    include storage.compression_history
+    style * {
+      color secondary
+    }
+    style user {
+      color green
+      shape person
+    }
+    style backend.compressor {
+      color red
+    }
+    style backend.pruning {
+      color red
+    }
+    style backend.quantization {
+      color red
+    }
+    style backend.hybrid {
+      color red
+    }
+    style backend.kd {
+      color red
+    }
+    style backend.normalizer {
+      color amber
+    }
+    style backend.taskState {
+      color sky
+    }
+    style storage {
+      color muted
+    }
+  }
+
+  view training_flow {
+    title 'Training and Preparation Workflow'
+    include user
+    include frontend.dashboard, frontend.apiLayer
+    include backend.baselines_api
+    include backend.prepare_api, backend.prepare_status
+    include backend.taskState
+    include backend.trainer, backend.preparer
+    include storage.baseline_checkpoints
+    include storage.per_model_results
+    include storage.training_results_all
+    include storage.assets
+    style * {
+      color secondary
+    }
+    style user {
+      color green
+      shape person
+    }
+    style backend.trainer {
+      color indigo
+    }
+    style backend.preparer {
+      color indigo
+    }
+    style backend.taskState {
+      color sky
+    }
+    style storage {
+      color muted
+    }
+  }
+
+  view comparison_flow {
+    title 'Model Comparison and Dashboard Flow'
+    include user
+    include frontend.dashboard, frontend.apiLayer, frontend.energySection
+    include backend.dashboard_api, backend.compare_api
+    include backend.model_compare_options, backend.model_compare
+    include backend.history_api
+    include backend.normalizer
+    include storage.baseline_checkpoints, storage.compressed_models
+    include storage.compression_history, storage.training_results_all
+    include storage.assets
+    style * {
+      color secondary
+    }
+    style user {
+      color green
+      shape person
+    }
+    style backend.normalizer {
+      color amber
+    }
+    style frontend.energySection {
+      color green
+    }
+    style storage {
+      color muted
+    }
+  }
+
+  view storage_view of storage {
+    title 'Artifacts and Results Store — All Persisted Files'
+    include *
+    include backend.trainer
+    include backend.preparer
+    include backend.compressor
+    include backend.normalizer
+    include backend.model_compare
+    style * {
+      color muted
+    }
+    style backend.trainer {
+      color indigo
+    }
+    style backend.preparer {
+      color indigo
+    }
+    style backend.compressor {
+      color red
+    }
+    style backend.normalizer {
+      color amber
+    }
+  }
+
+}

@@ -44,6 +44,7 @@ import copy
 import time
 import gzip
 import io
+import warnings
 
 
 # ============================================================
@@ -351,30 +352,84 @@ def load_compressed(path, device='cpu'):
     return state
 
 
-def export_to_tensorrt(model, input_shape, save_path):
-    """
-    Converts a QAT-prepared model to a TensorRT engine.
-    This is the only way to trigger RTX 5090 Tensor Cores for INT8.
+def export_to_tensorrt(model, input_shape, save_path, prefer_int8=True):
+    """Compile a model with TensorRT and best-effort persist a runtime artifact.
+
+    Falls back through precision modes to keep TensorRT runtime available:
+    INT8 (when modelopt is installed) -> FP16 -> FP32.
+
+    Returns:
+        tuple: (compiled_model, backend_label, saved_artifact_path, precision_mode)
     """
     import importlib
-    torch_tensorrt = importlib.import_module("torch_tensorrt")
+    import importlib.util
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for TensorRT export.")
 
+    if importlib.util.find_spec("torch_tensorrt") is None:
+        raise RuntimeError("torch_tensorrt is not installed in the current environment.")
+
+    torch_tensorrt = importlib.import_module("torch_tensorrt")
+    has_modelopt = importlib.util.find_spec("modelopt") is not None
+
     model.eval()
     model.to("cuda")
 
-    trt_gm = torch_tensorrt.compile(
-        model,
-        ir="torch_compile",
-        inputs=[torch_tensorrt.Input(input_shape)],
-        enabled_precisions={torch.int8},
-    )
+    compile_modes = []
+    if prefer_int8:
+        if has_modelopt:
+            compile_modes.append(("int8", {torch.int8}, "TensorRT INT8 / Tensor Cores"))
+        else:
+            print("[Quantization] modelopt not found; skipping TensorRT INT8 and trying FP16.")
+    compile_modes.append(("fp16", {torch.float16}, "TensorRT FP16 / Tensor Cores"))
+    compile_modes.append(("fp32", {torch.float32}, "TensorRT FP32"))
 
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    torch.jit.save(torch.jit.script(trt_gm), save_path)
-    return trt_gm
+    compile_errors = []
+
+    for precision_mode, enabled_precisions, backend_label in compile_modes:
+        try:
+            trt_gm = torch_tensorrt.compile(
+                model,
+                ir="torch_compile",
+                inputs=[torch_tensorrt.Input(shape=tuple(input_shape), dtype=torch.float32)],
+                enabled_precisions=enabled_precisions,
+            )
+
+            saved_path = ""
+            if save_path:
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                path_root, path_ext = os.path.splitext(save_path)
+                suffix = f"_{precision_mode}"
+                artifact_path = f"{path_root}{suffix}{path_ext or '.ts'}"
+                try:
+                    # Scripting can fail on torch.compile graphs with complex annotations.
+                    # Tracing avoids annotation-related crashes in this path.
+                    example = torch.randn(*input_shape, device="cuda")
+                    with torch.no_grad():
+                        traced = torch.jit.trace(trt_gm, example, strict=False)
+                    traced = torch.jit.freeze(traced.eval())
+                    torch.jit.save(traced, artifact_path)
+                    saved_path = artifact_path
+                except Exception as save_err:
+                    print(
+                        "[Quantization] TensorRT compile succeeded, but saving the artifact failed "
+                        f"({type(save_err).__name__}): {save_err}"
+                    )
+
+            return trt_gm, backend_label, saved_path, precision_mode
+        except Exception as compile_err:
+            compile_errors.append(
+                f"{precision_mode}:{type(compile_err).__name__}:{compile_err}"
+            )
+            print(
+                f"[Quantization] TensorRT {precision_mode.upper()} compile failed "
+                f"({type(compile_err).__name__}): {compile_err}"
+            )
+
+    raise RuntimeError(
+        "All TensorRT compile attempts failed: " + " | ".join(compile_errors)
+    )
 
 
 def distillation_loss(student_out, teacher_out, labels, T=3.0, alpha=0.5):
@@ -831,6 +886,17 @@ def _get_quantization_api():
     if ao is not None and hasattr(ao, 'quantization'):
         return ao.quantization
     return torch.quantization
+
+
+def _call_quant_api_safely(api_callable, *args, **kwargs):
+    """Call quantization APIs while suppressing known torch.ao deprecation noise."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=DeprecationWarning,
+            message=r".*torch\.ao\.quantization is deprecated.*",
+        )
+        return api_callable(*args, **kwargs)
 
 
 def _select_quantized_backend(preferred=None):
@@ -1450,6 +1516,7 @@ def apply_quantization(model, train_loader, test_loader, device,
     fallback_float_model = None
     tensorrt_model = None
     tensorrt_engine_path = ""
+    tensorrt_precision_mode = ""
     runtime_backend_used = "Torch Quantization (CPU kernels)"
 
     training_tracker = _start_emissions_tracker(
@@ -1511,7 +1578,7 @@ def apply_quantization(model, train_loader, test_loader, device,
                 model.fuse_model()
 
             model.qconfig = qat_api.get_default_qat_qconfig(backend)
-            qat_api.prepare_qat(model, inplace=True)
+            _call_quant_api_safely(qat_api.prepare_qat, model, inplace=True)
 
             # Validation forward pass — catch incompatible architectures BEFORE
             # wasting time on the full QAT training loop.
@@ -1562,18 +1629,22 @@ def apply_quantization(model, train_loader, test_loader, device,
                     build_compressed_model_path(save_dir, model_name, 'qat_tensorrt')
                 )[0] + '.ts'
                 try:
-                    _cb("Exporting QAT model to TensorRT (INT8)...")
-                    tensorrt_model = export_to_tensorrt(
+                    _cb("Exporting QAT model to TensorRT (INT8 -> FP16/FP32 fallback)...")
+                    tensorrt_model, runtime_backend_used, saved_trt_path, tensorrt_precision_mode = export_to_tensorrt(
                         _safe_model_copy(model),
                         input_shape,
                         tensorrt_engine_path,
                     )
-                    runtime_backend_used = "TensorRT / Tensor Cores"
-                    _cb("TensorRT export succeeded")
+                    tensorrt_engine_path = saved_trt_path
+                    if tensorrt_engine_path:
+                        _cb("TensorRT export succeeded")
+                    else:
+                        _cb("TensorRT compiled; artifact save skipped")
                 except Exception as trt_err:
                     print(f"[Quantization] TensorRT export failed ({type(trt_err).__name__}): {trt_err}")
                     tensorrt_model = None
                     tensorrt_engine_path = ""
+                    tensorrt_precision_mode = ""
                     runtime_backend_used = "Torch Quantization (CPU kernels)"
                     _cb("TensorRT export failed; continuing with torch quantization path")
 
@@ -1581,7 +1652,7 @@ def apply_quantization(model, train_loader, test_loader, device,
             _cb("Converting QAT model to INT8 on CPU...")
             model.to(torch.device('cpu'))
             model.eval()
-            qat_api.convert(model, inplace=True)
+            _call_quant_api_safely(qat_api.convert, model, inplace=True)
             quantized_model = model
             quantization_type = "qat_int8"
             qat_succeeded = True
@@ -1607,7 +1678,7 @@ def apply_quantization(model, train_loader, test_loader, device,
                     model_ptsq.fuse_model()
 
                 model_ptsq.qconfig = qat_api.get_default_qconfig(backend)
-                qat_api.prepare(model_ptsq, inplace=True)
+                _call_quant_api_safely(qat_api.prepare, model_ptsq, inplace=True)
 
                 # Calibrate with training data (observers collect activation statistics)
                 _cb("Calibrating static quantization on CPU (50 batches)...")
@@ -1617,7 +1688,7 @@ def apply_quantization(model, train_loader, test_loader, device,
                             break
                         model_ptsq(inputs.to(ptsq_dev))
 
-                qat_api.convert(model_ptsq, inplace=True)
+                _call_quant_api_safely(qat_api.convert, model_ptsq, inplace=True)
                 quantized_model = model_ptsq
                 quantization_type = "ptsq_int8"
                 ptsq_succeeded = True
@@ -1654,7 +1725,6 @@ def apply_quantization(model, train_loader, test_loader, device,
     if quant_eval_dev.type == 'cuda':
         if tensorrt_model is not None:
             benchmark_compressed_model = tensorrt_model
-            runtime_backend_used = "TensorRT / Tensor Cores"
         else:
             # Quantized torch kernels are CPU-only; use float fallback for GPU-side fair benchmarking.
             benchmark_compressed_model = (
@@ -1756,12 +1826,15 @@ def apply_quantization(model, train_loader, test_loader, device,
         "co2_kg": compressed_total_co2,
         "energy_kwh": compressed_total_energy,
         "hardware_target": "NVIDIA RTX 5090",
-        "acceleration_backend": "TensorRT / Tensor Cores",
         "energy_measurement_method": "CodeCarbon / GPU-Specific Power Draw",
         "runtime_backend_used": runtime_backend_used,
         "tensorrt_engine_path": tensorrt_engine_path,
+        "tensorrt_precision_mode": tensorrt_precision_mode,
+        "acceleration_backend": runtime_backend_used,
         "saved_path": save_path,
     }
+
+
 def apply_hybrid(model, train_loader, test_loader, device,
                  amount=0.25, fine_tune_epochs=5, save_dir='../models/uploads',
                  progress_cb=None, model_name='model',
@@ -1938,7 +2011,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
         if hasattr(model, 'fuse_model'):
             model.fuse_model()
         model.qconfig = qat_api.get_default_qat_qconfig(backend)
-        qat_api.prepare_qat(model, inplace=True)
+        _call_quant_api_safely(qat_api.prepare_qat, model, inplace=True)
 
         # Validation forward pass — catch incompatible architectures early
         with torch.no_grad():
@@ -1984,7 +2057,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
         fallback_float_model = copy.deepcopy(model).cpu().eval()
         model.to(torch.device('cpu'))
         model.eval()
-        qat_api.convert(model, inplace=True)
+        _call_quant_api_safely(qat_api.convert, model, inplace=True)
         quant_model = model
         hybrid_quantization_type = "qat_int8"
         hybrid_qat_succeeded = True
@@ -2010,7 +2083,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
                 model_ptsq.fuse_model()
 
             model_ptsq.qconfig = qat_api.get_default_qconfig(backend)
-            qat_api.prepare(model_ptsq, inplace=True)
+            _call_quant_api_safely(qat_api.prepare, model_ptsq, inplace=True)
 
             _cb("Calibrating hybrid static quantization on CPU (50 batches)...")
             with torch.no_grad():
@@ -2019,7 +2092,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
                         break
                     model_ptsq(inputs.to(ptsq_dev))
 
-            qat_api.convert(model_ptsq, inplace=True)
+            _call_quant_api_safely(qat_api.convert, model_ptsq, inplace=True)
             quant_model = model_ptsq
             hybrid_quantization_type = "ptsq_int8"
             hybrid_ptsq_succeeded = True
