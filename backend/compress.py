@@ -1483,9 +1483,9 @@ def apply_quantization(model, train_loader, test_loader, device,
             _cb(f"Pre-QAT Epoch {epoch+1} Accuracy: {acc:.2f}%")
             pre_scheduler.step()
 
-        # ✅ Prepare for QAT — fbgemm/qnnpack only support QuantizedCPU, so QAT runs on CPU
-        _cb("Moving model to CPU for QAT (QuantizedCPU backend)...")
-        qat_dev = torch.device('cpu')
+        # ✅ Prepare for QAT — train on CUDA when available, then convert on CPU for quantized kernels
+        qat_dev = device if device.type == 'cuda' and torch.cuda.is_available() else torch.device('cpu')
+        _cb(f"Preparing QAT on {qat_dev}...")
         model.to(qat_dev)
         model.train()
         fallback_float_model = copy.deepcopy(model).cpu().eval()
@@ -1522,8 +1522,8 @@ def apply_quantization(model, train_loader, test_loader, device,
                 model.train()
             _cb("QAT preparation validated successfully")
 
-            # ✅ QAT TRAINING (all on CPU)
-            _cb("Starting QAT training (CPU)...")
+            # ✅ QAT TRAINING (CUDA when available)
+            _cb(f"Starting QAT training ({qat_dev})...")
             optimizer = optim.SGD(model.parameters(), lr=5e-4, momentum=0.9, weight_decay=5e-4)
             qat_scheduler = optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=max(1, fine_tune_epochs)
@@ -1555,6 +1555,7 @@ def apply_quantization(model, train_loader, test_loader, device,
                 qat_scheduler.step()
 
             model.load_state_dict(best_state)
+            fallback_float_model = copy.deepcopy(model).cpu().eval()
 
             if device.type == 'cuda':
                 tensorrt_engine_path = os.path.splitext(
@@ -1576,8 +1577,9 @@ def apply_quantization(model, train_loader, test_loader, device,
                     runtime_backend_used = "Torch Quantization (CPU kernels)"
                     _cb("TensorRT export failed; continuing with torch quantization path")
 
-            # Convert to INT8
-            _cb("Converting QAT model to INT8...")
+            # Convert to INT8 (CPU-only kernels)
+            _cb("Converting QAT model to INT8 on CPU...")
+            model.to(torch.device('cpu'))
             model.eval()
             qat_api.convert(model, inplace=True)
             quantized_model = model
@@ -1592,7 +1594,8 @@ def apply_quantization(model, train_loader, test_loader, device,
         ptsq_succeeded = False
         if not qat_succeeded:
             try:
-                model_ptsq = copy.deepcopy(fallback_float_model).to(qat_dev)
+                ptsq_dev = torch.device('cpu')
+                model_ptsq = copy.deepcopy(fallback_float_model).to(ptsq_dev)
                 model_ptsq.eval()
 
                 QuantWrapper = getattr(qat_api, 'QuantWrapper',
@@ -1607,12 +1610,12 @@ def apply_quantization(model, train_loader, test_loader, device,
                 qat_api.prepare(model_ptsq, inplace=True)
 
                 # Calibrate with training data (observers collect activation statistics)
-                _cb("Calibrating static quantization (50 batches)...")
+                _cb("Calibrating static quantization on CPU (50 batches)...")
                 with torch.no_grad():
                     for batch_idx, (inputs, _) in enumerate(train_loader):
                         if batch_idx >= 50:
                             break
-                        model_ptsq(inputs.to(qat_dev))
+                        model_ptsq(inputs.to(ptsq_dev))
 
                 qat_api.convert(model_ptsq, inplace=True)
                 quantized_model = model_ptsq
@@ -1908,9 +1911,9 @@ def apply_hybrid(model, train_loader, test_loader, device,
     total = count_params(model)
 
     # Step 2: Quantize — QAT with QuantWrapper → PTSQ fallback → Dynamic fallback
-    # QAT must run on CPU — fbgemm/qnnpack use QuantizedCPU kernel only
-    _cb("Applying INT8 quantization (moving to CPU for QuantizedCPU backend)...")
-    qat_dev = torch.device('cpu')
+    # Train QAT on CUDA when available, convert on CPU for quantized kernels
+    qat_dev = device if device.type == 'cuda' and torch.cuda.is_available() else torch.device('cpu')
+    _cb(f"Applying INT8 quantization (QAT on {qat_dev})...")
     model.to(qat_dev)
     model.eval()
     fallback_float_model = copy.deepcopy(model).cpu().eval()
@@ -1978,6 +1981,8 @@ def apply_hybrid(model, train_loader, test_loader, device,
                 print("[Hybrid/QAT] Accuracy guard triggered; stopping QAT early.")
                 break
         model.load_state_dict(best_state)
+        fallback_float_model = copy.deepcopy(model).cpu().eval()
+        model.to(torch.device('cpu'))
         model.eval()
         qat_api.convert(model, inplace=True)
         quant_model = model
@@ -1992,7 +1997,8 @@ def apply_hybrid(model, train_loader, test_loader, device,
     hybrid_ptsq_succeeded = False
     if not hybrid_qat_succeeded:
         try:
-            model_ptsq = copy.deepcopy(fallback_float_model).to(qat_dev)
+            ptsq_dev = torch.device('cpu')
+            model_ptsq = copy.deepcopy(fallback_float_model).to(ptsq_dev)
             model_ptsq.eval()
 
             QuantWrapper = getattr(qat_api, 'QuantWrapper',
@@ -2006,12 +2012,12 @@ def apply_hybrid(model, train_loader, test_loader, device,
             model_ptsq.qconfig = qat_api.get_default_qconfig(backend)
             qat_api.prepare(model_ptsq, inplace=True)
 
-            _cb("Calibrating hybrid static quantization (50 batches)...")
+            _cb("Calibrating hybrid static quantization on CPU (50 batches)...")
             with torch.no_grad():
                 for batch_idx, (inputs, _) in enumerate(train_loader):
                     if batch_idx >= 50:
                         break
-                    model_ptsq(inputs.to(qat_dev))
+                    model_ptsq(inputs.to(ptsq_dev))
 
             qat_api.convert(model_ptsq, inplace=True)
             quant_model = model_ptsq

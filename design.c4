@@ -185,9 +185,9 @@ views {
     title 'Compression Workflow'
     include user
     include frontend.dashboard, frontend.apiLayer
-    include backend.compress_preloaded, backend.compress_dynamic
+    include backend.compress_preloaded
     include backend.compressor, backend.normalizer
-    include storage.compressed_models, storage.uploaded_models, storage.results_json
+    include storage.compressed_models, storage.results_json
     style * {
       color secondary
     }
