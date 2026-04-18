@@ -263,7 +263,7 @@ def _to_fp16_state_dict(state):
     return fp16_state
 
 
-def save_smallest_artifact(model, base_path, prefer_sparse=False):
+def save_smallest_artifact(model, base_path, prefer_sparse=False, include_fp16_variant=True):
     """Save multiple artifact variants and keep the smallest on disk.
 
     Returns:
@@ -285,10 +285,11 @@ def save_smallest_artifact(model, base_path, prefer_sparse=False):
         save_sparse_state_dict(model, sparse_path)
         candidates.append(sparse_path)
 
-    # fp16 artifact
-    fp16_path = base_path.replace('.pth', '_fp16.pth')
-    torch.save(_to_fp16_state_dict(state), fp16_path)
-    candidates.append(fp16_path)
+    # fp16 artifact (optional)
+    if include_fp16_variant:
+        fp16_path = base_path.replace('.pth', '_fp16.pth')
+        torch.save(_to_fp16_state_dict(state), fp16_path)
+        candidates.append(fp16_path)
 
     # Gzipped variants
     gz_candidates = []
@@ -389,12 +390,28 @@ def export_to_tensorrt(model, input_shape, save_path, prefer_int8=True):
 
     for precision_mode, enabled_precisions, backend_label in compile_modes:
         try:
-            trt_gm = torch_tensorrt.compile(
-                model,
-                ir="torch_compile",
-                inputs=[torch_tensorrt.Input(shape=tuple(input_shape), dtype=torch.float32)],
-                enabled_precisions=enabled_precisions,
-            )
+            compile_kwargs = {
+                "ir": "torch_compile",
+                "inputs": [torch_tensorrt.Input(shape=tuple(input_shape), dtype=torch.float32)],
+                "enabled_precisions": enabled_precisions,
+            }
+
+            # Lower partition threshold so architectures with many small blocks
+            # (e.g., ShuffleNet variants) still convert useful TRT subgraphs.
+            try:
+                trt_gm = torch_tensorrt.compile(
+                    model,
+                    min_block_size=1,
+                    **compile_kwargs,
+                )
+            except TypeError:
+                trt_gm = torch_tensorrt.compile(model, **compile_kwargs)
+            except Exception as partition_err:
+                print(
+                    f"[Quantization] TensorRT {precision_mode.upper()} compile with min_block_size=1 failed "
+                    f"({type(partition_err).__name__}): {partition_err}; retrying default partitioning."
+                )
+                trt_gm = torch_tensorrt.compile(model, **compile_kwargs)
 
             saved_path = ""
             if save_path:
@@ -402,20 +419,10 @@ def export_to_tensorrt(model, input_shape, save_path, prefer_int8=True):
                 path_root, path_ext = os.path.splitext(save_path)
                 suffix = f"_{precision_mode}"
                 artifact_path = f"{path_root}{suffix}{path_ext or '.ts'}"
-                try:
-                    # Scripting can fail on torch.compile graphs with complex annotations.
-                    # Tracing avoids annotation-related crashes in this path.
-                    example = torch.randn(*input_shape, device="cuda")
-                    with torch.no_grad():
-                        traced = torch.jit.trace(trt_gm, example, strict=False)
-                    traced = torch.jit.freeze(traced.eval())
-                    torch.jit.save(traced, artifact_path)
-                    saved_path = artifact_path
-                except Exception as save_err:
-                    print(
-                        "[Quantization] TensorRT compile succeeded, but saving the artifact failed "
-                        f"({type(save_err).__name__}): {save_err}"
-                    )
+                print(
+                    "[Quantization] TensorRT compile succeeded; skipping artifact save for "
+                    "torch_compile runtime module"
+                )
 
             return trt_gm, backend_label, saved_path, precision_mode
         except Exception as compile_err:
@@ -562,8 +569,8 @@ def _finalize_emissions_tracking(tracker, phase_label, started_at):
     )
     if emissions_kg <= 0 and elapsed_s > 0:
         print(
-            f"[CodeCarbon] {phase_label} produced 0 CO2. "
-            f"Workload may be too short for measurable emissions."
+            f"[CodeCarbon Warning] {phase_label} produced 0.0 CO2 in {elapsed_s:.2f}s. "
+            "Check if GPU was fully utilized or increase workload duration."
         )
     return emissions_kg, energy_kwh, round(elapsed_s, 2)
 
@@ -574,14 +581,25 @@ def _track_inference_emissions(model, loader, dev, project_name, output_dir, max
     started_at = time.time()
     inference_error = None
     try:
+        start_workload = time.time()
         model = model.to(dev)
         model.eval()
         with torch.no_grad():
-            for batch_idx, (inputs, _) in enumerate(loader):
-                if max_batches is not None and batch_idx >= max_batches:
+            # Keep GPU active for at least 3 seconds so CodeCarbon can sample
+            # short, high-throughput workloads (e.g., RTX 5090).
+            while (time.time() - start_workload) < 3.0:
+                loop_batches = 0
+                for batch_idx, (inputs, _) in enumerate(loader):
+                    if max_batches is not None and batch_idx >= max_batches:
+                        break
+                    inputs = inputs.to(dev)
+                    _extract_logits(model(inputs))
+                    loop_batches += 1
+                if loop_batches == 0:
                     break
-                inputs = inputs.to(dev)
-                _extract_logits(model(inputs))
+
+        if str(dev).startswith('cuda'):
+            torch.cuda.synchronize()
     except Exception as e:
         inference_error = e
     finally:
@@ -650,6 +668,38 @@ def _safe_model_copy(model):
         return copy.deepcopy(model)
     except Exception:
         return model
+
+
+def _unwrap_quant_wrapper_if_present(model):
+    """Return the inner model when QuantWrapper is used around a network."""
+    if isinstance(model, nn.Module) and hasattr(model, 'module') and hasattr(model, 'quant') and hasattr(model, 'dequant'):
+        return model.module
+    return model
+
+
+def _prepare_deployment_float_model(model):
+    """Create a clean float deployment model from a QAT-trained graph.
+
+    Disables observer/fake-quant modules and unwraps QuantWrapper when present,
+    producing a better TensorRT export candidate.
+    """
+    export_model = _safe_model_copy(_unwrap_quant_wrapper_if_present(model)).eval()
+    if not isinstance(export_model, nn.Module):
+        return export_model
+
+    for module in export_model.modules():
+        if hasattr(module, 'disable_observer'):
+            try:
+                module.disable_observer()
+            except Exception:
+                pass
+        if hasattr(module, 'disable_fake_quant'):
+            try:
+                module.disable_fake_quant()
+            except Exception:
+                pass
+
+    return export_model
 
 
 def _safe_percent_reduction(baseline_value, compressed_value):
@@ -739,6 +789,13 @@ def _build_fair_comparison_metrics(
         output_dir=output_dir,
         max_batches=benchmark_infer_max_batches,
     )
+
+    # Explicit cleanup to avoid baseline tensors inflating compressed power readings.
+    del baseline_eval_model
+    if torch.cuda.is_available() and str(baseline_dev).startswith('cuda'):
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
     compressed_infer_co2, compressed_infer_energy, compressed_infer_duration = _track_inference_emissions(
         compressed_eval_model,
         test_loader,
@@ -747,6 +804,11 @@ def _build_fair_comparison_metrics(
         output_dir=output_dir,
         max_batches=benchmark_infer_max_batches,
     )
+
+    del compressed_eval_model
+    if torch.cuda.is_available() and str(compressed_dev).startswith('cuda'):
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
     # Training emissions benchmark under identical training workload settings.
     baseline_train_model = _safe_model_copy(baseline_model)
@@ -1622,7 +1684,8 @@ def apply_quantization(model, train_loader, test_loader, device,
                 qat_scheduler.step()
 
             model.load_state_dict(best_state)
-            fallback_float_model = copy.deepcopy(model).cpu().eval()
+            deployment_float_model = _prepare_deployment_float_model(model)
+            fallback_float_model = _safe_model_copy(deployment_float_model).cpu().eval()
 
             if device.type == 'cuda':
                 tensorrt_engine_path = os.path.splitext(
@@ -1631,7 +1694,7 @@ def apply_quantization(model, train_loader, test_loader, device,
                 try:
                     _cb("Exporting QAT model to TensorRT (INT8 -> FP16/FP32 fallback)...")
                     tensorrt_model, runtime_backend_used, saved_trt_path, tensorrt_precision_mode = export_to_tensorrt(
-                        _safe_model_copy(model),
+                        _safe_model_copy(deployment_float_model),
                         input_shape,
                         tensorrt_engine_path,
                     )
@@ -1708,7 +1771,12 @@ def apply_quantization(model, train_loader, test_loader, device,
 
         # ✅ Save
         save_path = build_compressed_model_path(save_dir, model_name, 'quantized')
-        save_path, quant_size = save_smallest_artifact(quantized_model, save_path, prefer_sparse=False)
+        save_path, quant_size = save_smallest_artifact(
+            quantized_model,
+            save_path,
+            prefer_sparse=False,
+            include_fp16_variant=False,
+        )
     finally:
         training_emissions_kg, training_energy_kwh, training_duration_s = _finalize_emissions_tracking(
             training_tracker,
@@ -1742,7 +1810,12 @@ def apply_quantization(model, train_loader, test_loader, device,
         quantized_model = torch.quantization.quantize_dynamic(
             base_for_fallback, {nn.Linear}, dtype=torch.qint8
         )
-        save_path, quant_size = save_smallest_artifact(quantized_model, save_path, prefer_sparse=False)
+        save_path, quant_size = save_smallest_artifact(
+            quantized_model,
+            save_path,
+            prefer_sparse=False,
+            include_fp16_variant=False,
+        )
         if quant_eval_dev.type == 'cuda':
             benchmark_compressed_model = copy.deepcopy(base_for_fallback).to(quant_eval_dev).eval()
             runtime_backend_used = "CUDA FP32 fallback (dynamic runtime)"
@@ -2112,7 +2185,12 @@ def apply_hybrid(model, train_loader, test_loader, device,
     # Save hybrid model
     _cb("Saving hybrid model...")
     save_path = build_compressed_model_path(save_dir, model_name, 'hybrid')
-    save_path, hybrid_size = save_smallest_artifact(quant_model, save_path, prefer_sparse=True)
+    save_path, hybrid_size = save_smallest_artifact(
+        quant_model,
+        save_path,
+        prefer_sparse=True,
+        include_fp16_variant=False,
+    )
 
     _cb("Evaluating hybrid model...")
     cpu_dev = torch.device('cpu')
@@ -2124,7 +2202,12 @@ def apply_hybrid(model, train_loader, test_loader, device,
         quant_model = torch.quantization.quantize_dynamic(
             fallback_float_model, {nn.Linear}, dtype=torch.qint8
         )
-        save_path, hybrid_size = save_smallest_artifact(quant_model, save_path, prefer_sparse=True)
+        save_path, hybrid_size = save_smallest_artifact(
+            quant_model,
+            save_path,
+            prefer_sparse=True,
+            include_fp16_variant=False,
+        )
         hybrid_acc = evaluate(quant_model, test_loader, dev=cpu_dev)
     latency = measure_latency(quant_model, input_shape=input_shape, dev=cpu_dev, n_runs=20)
 
