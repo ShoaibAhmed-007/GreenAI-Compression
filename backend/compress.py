@@ -1788,7 +1788,7 @@ def apply_quantization(model, train_loader, test_loader, device,
     tensorrt_precision_mode = ""
     runtime_backend_used = "Torch Quantization (CPU kernels)"
     model_key = _slugify_name(model_name)
-    use_fp16_safeguard = any(arch in model_key for arch in ["mobilenet", "efficientnet", "shufflenet", "squeezenet", "mnasnet", "densenet", "inception","googlenet"])
+    use_fp16_safeguard = any(arch in model_key for arch in ["mobilenet", "efficientnet", "shufflenet", "squeezenet", "mnasnet", "densenet", "inception", "googlenet", "vgg"])
     selected_precision = "fp16" if use_fp16_safeguard else "int8"
     runtime_precision = selected_precision
     runtime_selection_policy = "default"
@@ -2469,13 +2469,23 @@ def apply_hybrid(model, train_loader, test_loader, device,
     model.eval()
     fallback_float_model = copy.deepcopy(model).cpu().eval()
 
+    model_key = _slugify_name(model_name)
+    use_fp16_safeguard = any(arch in model_key for arch in ["mobilenet", "efficientnet", "shufflenet", "squeezenet", "mnasnet", "densenet", "inception", "googlenet", "vgg"])
+
     qat_api = _get_quantization_api()
     backend = _configure_quantized_backend()
     _cb(f"Using quantized backend: {backend}")
 
     # --- Attempt 1: Full QAT ---
     hybrid_qat_succeeded = False
-    try:
+    if use_fp16_safeguard:
+        _cb(f"Architecture {model_name} detected as complex/fragile; pivoting to FP16 safeguard.")
+        # We don't do QAT for these, we just skip to the final result using the float model
+        # which will be exported to TensorRT FP16 in the next step.
+        hybrid_qat_succeeded = True
+        hybrid_quantization_type = "fp16_safeguard"
+    else:
+        try:
         # Wrap model with QuantStub/DeQuantStub for architectures that lack native
         # quant support — prevents "input tensor dtype didn't match" errors.
         QuantWrapper = getattr(qat_api, 'QuantWrapper',
