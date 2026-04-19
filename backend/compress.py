@@ -996,18 +996,22 @@ def _build_fair_comparison_metrics(
     compressed_param_source = compressed_training_model if compressed_training_model is not None else compressed_model
     compressed_param_count = count_params(compressed_param_source)
 
-    default_train_batch = _get_loader_batch_size(train_loader, fallback=128)
-    default_test_batch = _get_loader_batch_size(test_loader, fallback=default_train_batch)
+    baseline_input_size = _input_size_from_shape(
+        baseline_input_shape,
+        fallback=getattr(baseline_model, 'input_size', 224),
+    )
+    compressed_input_size = _input_size_from_shape(
+        compressed_input_shape,
+        fallback=getattr(compressed_param_source, 'input_size', 224),
+    )
 
     baseline_benchmark_batch_size = _select_benchmark_batch_size(
-        total_params=baseline_param_count,
-        default_batch_size=default_test_batch,
-        device=baseline_dev,
+        baseline_param_count,
+        input_size=baseline_input_size,
     )
     compressed_benchmark_batch_size = _select_benchmark_batch_size(
-        total_params=compressed_param_count,
-        default_batch_size=default_test_batch,
-        device=compressed_dev,
+        compressed_param_count,
+        input_size=compressed_input_size,
     )
 
     baseline_benchmark_train_loader = _rebuild_loader_for_benchmark(
@@ -1944,15 +1948,37 @@ def _select_target_batch_size(total_params=None, default_batch_size=128, device=
     return base_batch, is_high_end_gpu
 
 
-def _select_benchmark_batch_size(total_params=None, default_batch_size=128, device=None):
-    """Select benchmark batch size based on model complexity for GPU saturation."""
-    target_batch, _ = _select_target_batch_size(
-        total_params=total_params,
-        default_batch_size=default_batch_size,
-        device=device,
-        input_size=32,
+def _select_benchmark_batch_size(params, input_size=224):
+    """Dynamically scale benchmark batch size while preventing activation OOM."""
+    try:
+        params = float(params)
+    except Exception:
+        params = 0.0
+
+    try:
+        input_size = int(input_size)
+    except Exception:
+        input_size = 224
+
+    # 224x224 activations consume much more memory than native CIFAR 32x32.
+    if input_size >= 224:
+        vram_limit_batch = 512
+    else:
+        vram_limit_batch = 1024
+
+    if params < SMALL_MODEL_PARAM_THRESHOLD:
+        target_batch = 1024
+    elif params < MEDIUM_MODEL_PARAM_THRESHOLD:
+        target_batch = 512
+    else:
+        target_batch = 256
+
+    final_batch = min(target_batch, vram_limit_batch)
+    print(
+        f"[Hardware Guard] Params: {params:.1f} | Res: {input_size} | "
+        f"Selected Batch: {final_batch}"
     )
-    return target_batch
+    return final_batch
 
 
 def _rebuild_loader_for_benchmark(loader, batch_size, shuffle=False):
@@ -2020,6 +2046,22 @@ def _shape_with_batch(input_shape, batch_size):
     if len(shape) == 0:
         return shape
     return (int(batch_size),) + tuple(shape[1:])
+
+
+def _input_size_from_shape(input_shape, fallback=224):
+    """Extract a spatial resolution from shape tuples like (N, C, H, W)."""
+    try:
+        shape = tuple(input_shape) if input_shape is not None else ()
+        if len(shape) >= 4:
+            return int(shape[2])
+        if len(shape) >= 3:
+            return int(shape[-1])
+    except Exception:
+        pass
+    try:
+        return int(fallback)
+    except Exception:
+        return 224
 
 
 def _select_trt_min_block_size(model_key):
@@ -2129,41 +2171,6 @@ def apply_pruning(model, train_loader, test_loader, device,
     model = copy.deepcopy(model).to(device)
     input_shape = detect_input_shape(model)
     baseline_model_for_benchmark = copy.deepcopy(model).to(device)
-
-    # Cap pruning loader batches to reduce CUDA OOM risk on heavier runs.
-    pruning_batch_cap = 512
-    train_batch_size = _get_loader_batch_size(train_loader, fallback=pruning_batch_cap)
-    test_batch_size = _get_loader_batch_size(test_loader, fallback=pruning_batch_cap)
-
-    if train_batch_size > pruning_batch_cap:
-        print(
-            f"[Pruning] Capping train batch size from {train_batch_size} "
-            f"to {pruning_batch_cap} to avoid CUDA OOM."
-        )
-        _cb(
-            f"[Pruning] Capping train batch size from {train_batch_size} "
-            f"to {pruning_batch_cap} to avoid CUDA OOM."
-        )
-        train_loader = _rebuild_loader_for_benchmark(
-            train_loader,
-            pruning_batch_cap,
-            shuffle=True,
-        )
-
-    if test_batch_size > pruning_batch_cap:
-        print(
-            f"[Pruning] Capping test batch size from {test_batch_size} "
-            f"to {pruning_batch_cap} to avoid CUDA OOM."
-        )
-        _cb(
-            f"[Pruning] Capping test batch size from {test_batch_size} "
-            f"to {pruning_batch_cap} to avoid CUDA OOM."
-        )
-        test_loader = _rebuild_loader_for_benchmark(
-            test_loader,
-            pruning_batch_cap,
-            shuffle=False,
-        )
 
     # ✅ Full baseline accuracy
     baseline_acc = evaluate(model, test_loader, dev=device)

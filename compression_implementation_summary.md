@@ -355,6 +355,10 @@ In backend/main.py:
 - The code prefers measured benchmark emissions and only projects when measurements are unavailable.
 - Inference measurement is steady-state time based (5s), with 2s warmup excluded from tracked energy.
 
+5. VRAM vs. activations
+- We prioritize activation-memory stability over theoretical maximum batch size during FairMetrics benchmarking.
+- For models resized to 224x224 (or higher), benchmark batch size is capped at 512 to avoid OOM in the 5-second steady-state window.
+
 
 ## 14) Quick Function Map
 
