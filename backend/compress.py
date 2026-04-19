@@ -17,6 +17,10 @@ Key fixes over previous version:
 - KD trains on TRAINING data, evaluates on TEST data (fixes data leakage)
 """
 
+import os
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -26,7 +30,6 @@ from torchvision.models import resnet18
 from torch.utils.data import DataLoader, Dataset
 import torchvision
 import torchvision.transforms as transforms
-import os
 import json
 import re
 import argparse
@@ -572,9 +575,11 @@ def measure_latency(model, input_shape=(1, 3, 32, 32), dev=None, n_runs=100):
     return round(elapsed, 2)
 
 
-def _clear_gpu_memory():
-    """Best-effort memory cleanup between benchmark tracker phases."""
-    gc.collect()
+def deep_clean_gpu():
+    """Release cached CUDA memory and stale IPC handles between benchmark phases."""
+    import gc as _gc
+
+    _gc.collect()
     if not torch.cuda.is_available():
         return
     try:
@@ -582,9 +587,18 @@ def _clear_gpu_memory():
     except Exception:
         pass
     try:
+        torch.cuda.ipc_collect()
+    except Exception:
+        pass
+    try:
         torch.cuda.synchronize()
     except Exception:
         pass
+
+
+def _clear_gpu_memory():
+    """Backward-compatible wrapper around deep CUDA cleanup."""
+    deep_clean_gpu()
 
 
 def _start_emissions_tracker(project_name, output_dir):
@@ -1080,7 +1094,7 @@ def _build_fair_comparison_metrics(
     )
 
     # Inference emissions benchmark under identical test workload settings.
-    _clear_gpu_memory()
+    deep_clean_gpu()
     baseline_infer_co2, baseline_infer_energy, baseline_infer_duration, baseline_infer_meta = _track_inference_emissions(
         baseline_eval_model,
         baseline_benchmark_test_loader,
@@ -1092,7 +1106,7 @@ def _build_fair_comparison_metrics(
 
     # Explicit cleanup to avoid baseline tensors inflating compressed power readings.
     del baseline_eval_model
-    _clear_gpu_memory()
+    deep_clean_gpu()
 
     compressed_infer_co2, compressed_infer_energy, compressed_infer_duration, compressed_infer_meta = _track_inference_emissions(
         compressed_eval_model,
@@ -1104,11 +1118,11 @@ def _build_fair_comparison_metrics(
     )
 
     del compressed_eval_model
-    _clear_gpu_memory()
+    deep_clean_gpu()
 
     # Training emissions benchmark under identical training workload settings.
     baseline_train_model = _safe_model_copy(baseline_model)
-    _clear_gpu_memory()
+    deep_clean_gpu()
     baseline_train_co2, baseline_train_energy, baseline_train_duration, baseline_train_err = _track_training_emissions(
         baseline_train_model,
         baseline_benchmark_train_loader,
@@ -1119,11 +1133,11 @@ def _build_fair_comparison_metrics(
         max_batches=benchmark_train_max_batches,
     )
     del baseline_train_model
-    _clear_gpu_memory()
+    deep_clean_gpu()
 
     compressed_train_source = compressed_param_source
     compressed_train_model = _safe_model_copy(compressed_train_source)
-    _clear_gpu_memory()
+    deep_clean_gpu()
     compressed_train_co2, compressed_train_energy, compressed_train_duration, compressed_train_err = _track_training_emissions(
         compressed_train_model,
         compressed_benchmark_train_loader,
@@ -1134,7 +1148,7 @@ def _build_fair_comparison_metrics(
         max_batches=compressed_train_batches,
     )
     del compressed_train_model
-    _clear_gpu_memory()
+    deep_clean_gpu()
 
     if baseline_train_err:
         warnings.append(f"Baseline training benchmark fallback: {baseline_train_err}")
@@ -1986,7 +2000,7 @@ def _select_target_batch_size(total_params=None, default_batch_size=128, device=
 
 
 def _select_benchmark_batch_size(params, input_size=224, mode='inference'):
-    """Resolution-aware benchmark batch selection for train/inference phases."""
+    """Asymmetric scaling for fair benchmarking stability and throughput."""
     try:
         params = float(params)
     except Exception:
@@ -1999,15 +2013,10 @@ def _select_benchmark_batch_size(params, input_size=224, mode='inference'):
 
     mode = str(mode).lower().strip()
 
-    # 224x224 activations consume much more memory than native CIFAR 32x32.
     if input_size >= 224:
-        vram_limit_batch = 512
+        vram_limit_batch = 512 if mode == 'inference' else 128
     else:
-        vram_limit_batch = 1024
-
-    # Training requires extra VRAM for gradients + optimizer states.
-    if mode == 'train':
-        vram_limit_batch = max(1, vram_limit_batch // 2)
+        vram_limit_batch = 1024 if mode == 'inference' else 512
 
     if params < SMALL_MODEL_PARAM_THRESHOLD:
         target_batch = 1024
@@ -2017,10 +2026,7 @@ def _select_benchmark_batch_size(params, input_size=224, mode='inference'):
         target_batch = 256
 
     final_batch = min(target_batch, vram_limit_batch)
-    print(
-        f"[Hardware Guard] Params: {params:.1f} | Res: {input_size} | "
-        f"Mode: {mode} | Selected Batch: {final_batch}"
-    )
+    print(f"[Hardware Guard] {mode.upper()} | Selected Batch: {final_batch}")
     return final_batch
 
 

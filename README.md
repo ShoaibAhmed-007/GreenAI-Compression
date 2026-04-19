@@ -81,6 +81,12 @@ source greenai_env/bin/activate
 # Install Python dependencies
 pip install torch torchvision fastapi uvicorn pydantic codecarbon pynvml
 
+# (Recommended) CUDA allocator setting to reduce memory fragmentation
+# PowerShell (Windows)
+$env:PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+# Bash (macOS/Linux)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # (Optional) Train the baseline model — downloads CIFAR-10 automatically
 cd backend
 python train.py

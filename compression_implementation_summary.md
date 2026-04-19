@@ -359,6 +359,10 @@ In backend/main.py:
 - We prioritize activation-memory stability over theoretical maximum batch size during FairMetrics benchmarking.
 - For models resized to 224x224 (or higher), benchmark batch size is capped at 512 to avoid OOM in the 5-second steady-state window.
 
+6. Activation bottleneck and asymmetric benchmarking
+- DenseNet-style feature concatenation amplifies activation memory during training because intermediate tensors must be retained for backpropagation through concatenated paths.
+- FairMetrics therefore uses asymmetric batches: inference can run at 512 to show throughput gains, while training is clamped to 128 for high-resolution workloads to keep tracker execution stable.
+
 
 ## 14) Quick Function Map
 
