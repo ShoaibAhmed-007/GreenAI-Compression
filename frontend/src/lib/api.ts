@@ -198,6 +198,9 @@ export async function getCompressionStatus(): Promise<CompressionStatus> {
 
 export interface DynamicResult {
   strategy: string;
+  resolved_strategy?: string;
+  resolved_technique?: string;
+  user_intent_layer?: 'Smart' | 'Preset' | 'Manual' | string;
   model_name?: string;
   model_key?: string;
   saved_at?: string;
@@ -248,6 +251,22 @@ export interface DynamicResult {
   emissions_reduction_percent?: number;
   energy_reduction_percent?: number;
   sanity_warnings?: string[];
+  co2_method?: string;
+  inference_images_processed?: number;
+  inference_iterations?: number;
+  benchmark_window_seconds?: number;
+  benchmark_warmup_seconds?: number;
+  energy_per_1k_images?: number | null;
+  hardware_saturation_level?: number;
+  bottleneck_analysis?: string;
+  runtime_warning?: string;
+  runtime_warnings?: string[];
+  smart_router_enabled?: boolean;
+  smart_router_group?: string;
+  smart_router_strategy?: string;
+  smart_target_batch_size?: number;
+  smart_effective_batch_size?: number;
+  smart_precision_preference?: string;
   benchmark_training_epochs?: number;
   benchmark_training_max_batches?: number;
   benchmark_inference_max_batches?: number | null;
@@ -852,11 +871,52 @@ export function clearSavedResults(): void {
   localStorage.removeItem(LEGACY_STORAGE_KEY);
 }
 
+function formatStrategyToken(token: string): string {
+  const normalized = token.trim().toLowerCase();
+  const labels: Record<string, string> = {
+    smart: 'Smart Router',
+    maximize_speed: 'Maximize Speed',
+    minimize_size: 'Minimize Size',
+    preserve_accuracy: 'Preserve Accuracy',
+    pruning: 'Pruning',
+    quantization: 'Quantization',
+    hybrid: 'Hybrid',
+    kd: 'Knowledge Distillation',
+  };
+  if (labels[normalized]) {
+    return labels[normalized];
+  }
+  return normalized
+    .replace(/apply_/g, '')
+    .replace(/_/g, ' ')
+    .split(' ')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
 /** Convert a DynamicResult into a Strategy so it can be shown in charts/tables */
 export function dynamicResultToStrategy(r: DynamicResult): Strategy {
   const normalized = normalizeDynamicResult(r);
   const modelLabel = normalized.model_name || normalized.model_key || 'Custom';
-  const methodLabel = normalized.compression_method || normalized.strategy || '';
+  const requestedLabel = formatStrategyToken(normalized.strategy || normalized.compression_method || '');
+  const smartResolvedLabel = normalized.smart_router_strategy
+    ? formatStrategyToken(normalized.smart_router_strategy)
+    : '';
+  const resolvedTechniqueLabel = normalized.resolved_technique
+    ? formatStrategyToken(normalized.resolved_technique)
+    : '';
+
+  let methodLabel = requestedLabel;
+  if (normalized.strategy === 'smart' && smartResolvedLabel) {
+    methodLabel = `${requestedLabel} (${smartResolvedLabel})`;
+  } else if (normalized.user_intent_layer === 'Preset' && resolvedTechniqueLabel) {
+    methodLabel = `${requestedLabel} (${resolvedTechniqueLabel})`;
+  }
+
+  if (!methodLabel) {
+    methodLabel = formatStrategyToken(normalized.compression_method || normalized.strategy || 'compression');
+  }
   const baselineTotalCo2 = normalized.baseline_training_co2_kg ?? normalized.baseline_total_emissions_kg;
   const compressedTotalCo2 = normalized.compressed_total_emissions_kg;
   const trainingCo2 = normalized.training_co2_kg ?? normalized.training_emissions_kg;
@@ -867,7 +927,7 @@ export function dynamicResultToStrategy(r: DynamicResult): Strategy {
   const inferenceEnergy = normalized.inference_energy_kwh ?? normalized.energy_kwh;
   return {
     key: `dyn_${(normalized.model_key || normalized.model_name || 'x').replace(/\s/g, '_')}_${normalized.strategy}`,
-    name: `${modelLabel} · ${methodLabel.charAt(0).toUpperCase() + methodLabel.slice(1)}`,
+    name: `${modelLabel} · ${methodLabel}`,
     accuracy: normalized.compressed_accuracy,
     size_MB: normalized.size_MB,
     size_reduction: normalized.size_reduction_percent,

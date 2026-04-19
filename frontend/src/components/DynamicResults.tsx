@@ -9,11 +9,20 @@ interface DynamicResultsProps {
 }
 
 const STRATEGY_LABELS: Record<string, string> = {
+  smart: 'Auto-Green (Smart)',
+  maximize_speed: 'Preset: Maximize Speed',
+  minimize_size: 'Preset: Minimize Size',
+  preserve_accuracy: 'Preset: Preserve Accuracy',
   pruning: 'Pruning',
   quantization: 'Quantization',
   hybrid: 'Hybrid',
   kd: 'Knowledge Distillation',
 };
+
+function formatResolvedTechnique(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/^apply_/, '');
+  return STRATEGY_LABELS[normalized] || normalized.replace(/_/g, ' ');
+}
 
 function formatCo2(value: number): string {
   if (!Number.isFinite(value)) return 'Not Available';
@@ -207,6 +216,15 @@ export function DynamicResults({ results, onClear }: DynamicResultsProps) {
                       )}
                       {result.dataset && (
                         <DetailRow label="Dataset" value={result.dataset} />
+                      )}
+                      {result.user_intent_layer && (
+                        <DetailRow label="Intent Layer" value={result.user_intent_layer} />
+                      )}
+                      {result.resolved_technique && (
+                        <DetailRow
+                          label="Resolved Technique"
+                          value={formatResolvedTechnique(result.resolved_technique)}
+                        />
                       )}
                       {result.pipeline && (
                         <div className="col-span-2">

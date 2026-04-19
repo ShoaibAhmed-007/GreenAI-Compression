@@ -20,6 +20,10 @@ interface CompressionDialogProps {
 }
 
 const TECHNIQUES = [
+  { key: 'smart', label: 'Auto-Green (Smart)' },
+  { key: 'maximize_speed', label: 'Preset: Max Speed' },
+  { key: 'minimize_size', label: 'Preset: Min Size' },
+  { key: 'preserve_accuracy', label: 'Preset: Preserve Acc.' },
   { key: 'pruning', label: 'Pruning' },
   { key: 'quantization', label: 'Quantization' },
   { key: 'hybrid', label: 'Hybrid' },
@@ -88,7 +92,7 @@ export function CompressionDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resultsByTechnique, setResultsByTechnique] = useState<Record<string, DynamicResult>>({});
-  const [selectedTechnique, setSelectedTechnique] = useState<string>('pruning');
+  const [selectedTechnique, setSelectedTechnique] = useState<string>('smart');
   const [runningMode, setRunningMode] = useState<'single' | 'all' | null>(null);
   const [runningMethod, setRunningMethod] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<string | null>(null);

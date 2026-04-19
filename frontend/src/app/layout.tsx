@@ -90,7 +90,7 @@ export default function RootLayout({
               </div>
               <p className="text-[0.65rem] text-on-surface-variant/30 font-technical uppercase tracking-widest">
                 GreenAI — Final Year Project | 11 Pretrained Models · CIFAR-10/100 |
-                Pruning · Quantization · Hybrid · Knowledge Distillation
+                Smart Router · Presets (Speed/Size/Accuracy) · Manual (Pruning/Quantization/Hybrid/KD)
               </p>
             </div>
           </footer>

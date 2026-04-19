@@ -38,11 +38,43 @@ function formatCo2(value: number | null): string {
   return `${value.toFixed(6)} kg`;
 }
 
+function formatEnergyPer1k(value: number | null): string {
+  if (value == null) return 'Not Available';
+  return `${value.toFixed(8)} kWh / 1k images`;
+}
+
+function formatRatio(value: number | null): string {
+  if (value == null) return 'Not Available';
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatStrategyToken(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  const labels: Record<string, string> = {
+    smart: 'Auto-Green (Smart)',
+    maximize_speed: 'Preset: Maximize Speed',
+    minimize_size: 'Preset: Minimize Size',
+    preserve_accuracy: 'Preset: Preserve Accuracy',
+    pruning: 'Manual: Pruning',
+    quantization: 'Manual: Quantization',
+    hybrid: 'Manual: Hybrid',
+    kd: 'Manual: Knowledge Distillation',
+  };
+  if (labels[normalized]) return labels[normalized];
+  return normalized
+    .replace(/apply_/g, '')
+    .replace(/_/g, ' ')
+    .split(' ')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
 function strategyLabel(result: DynamicResult | null): string {
   if (!result) return 'Not Available';
   const raw = String(result.strategy || result.compression_method || '').trim();
   if (raw === '') return 'Not Available';
-  return raw.charAt(0).toUpperCase() + raw.slice(1);
+  return formatStrategyToken(raw);
 }
 
 function resolveAccuracy(result: DynamicResult | null): number | null {
@@ -87,12 +119,34 @@ export function CompressionResults({ result }: CompressionResultsProps) {
   const latency = resolveLatency(result);
   const size = resolveSize(result);
   const co2 = resolveCo2(result);
+  const energyPer1k = toFiniteNumber(result.energy_per_1k_images ?? null);
+  const saturation = toFiniteNumber(result.hardware_saturation_level ?? null);
+  const co2Method = result.co2_method || 'Not Available';
+  const bottleneck = result.bottleneck_analysis || 'Not Available';
+  const smartRoute = result.strategy === 'smart' ? (result.smart_router_strategy || result.resolved_strategy) : null;
+  const resolvedTechnique = result.resolved_technique ? formatStrategyToken(result.resolved_technique) : null;
+  const userIntentLayer = result.user_intent_layer || null;
 
   return (
     <div className="space-y-3">
       <div className="bg-surface-container-low rounded-xl p-4">
         <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Applied Compression Technique</p>
         <p className="text-base font-semibold text-on-surface mt-1">{strategyLabel(result)}</p>
+        {smartRoute && (
+          <p className="text-xs text-on-surface-variant mt-1">
+            Router selected: <span className="font-semibold text-primary">{formatStrategyToken(String(smartRoute))}</span>
+          </p>
+        )}
+        {userIntentLayer && (
+          <p className="text-xs text-on-surface-variant mt-1">
+            Intent layer: <span className="font-semibold text-secondary">{userIntentLayer}</span>
+          </p>
+        )}
+        {resolvedTechnique && (
+          <p className="text-xs text-on-surface-variant mt-1">
+            Resolved technique: <span className="font-semibold text-tertiary">{resolvedTechnique}</span>
+          </p>
+        )}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -115,6 +169,24 @@ export function CompressionResults({ result }: CompressionResultsProps) {
           <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Compressed CO2 Emissions</p>
           <p className="text-2xl font-technical font-bold text-on-surface mt-1">{formatCo2(co2)}</p>
         </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="bg-surface-container-low rounded-xl p-4">
+          <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Energy Intensity</p>
+          <p className="text-sm font-technical font-semibold text-primary mt-1">{formatEnergyPer1k(energyPer1k)}</p>
+        </div>
+
+        <div className="bg-surface-container-low rounded-xl p-4">
+          <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Hardware Saturation</p>
+          <p className="text-sm font-technical font-semibold text-secondary mt-1">{formatRatio(saturation)}</p>
+        </div>
+      </div>
+
+      <div className="bg-surface-container-low rounded-xl p-4 space-y-2">
+        <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Benchmark Notes</p>
+        <p className="text-sm text-on-surface"><span className="font-semibold">CO2 method:</span> {co2Method}</p>
+        <p className="text-sm text-on-surface"><span className="font-semibold">Bottleneck analysis:</span> {bottleneck}</p>
       </div>
 
       <p className="text-xs text-on-surface-variant/50">

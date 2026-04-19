@@ -13,6 +13,7 @@ import SampleImageSelector from '@/components/model-comparison/SampleImageSelect
 import ImageUploadDropzone from '@/components/model-comparison/ImageUploadDropzone';
 import SelectedImagePreview from '@/components/model-comparison/SelectedImagePreview';
 import PredictionComparisonResults from '@/components/model-comparison/PredictionComparisonResults';
+import { DefenseStrategyPanel } from '@/components/DefenseStrategyPanel';
 import useCompareImage from '@/lib/hooks/useCompareImage';
 
 type SourceMode = 'sample' | 'upload';
@@ -221,6 +222,8 @@ export default function ModelComparisonPage() {
           Execute side-by-side inference testing to validate performance and accuracy of your compressed edge models against high-precision baselines.
         </p>
       </header>
+
+      <DefenseStrategyPanel compact />
 
       {(initialError || formError || error) && (
         <div className="bg-error-container/10 rounded-xl p-3 text-sm text-on-error-container ghost-border">

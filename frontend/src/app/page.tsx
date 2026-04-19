@@ -15,6 +15,7 @@ import { EnergySection } from '@/components/EnergySection';
 import { ModelSelector } from '@/components/ModelSelector';
 import { CompressionDialog } from '@/components/CompressionDialog';
 import { PreparePanel } from '@/components/PreparePanel';
+import { DefenseStrategyPanel } from '@/components/DefenseStrategyPanel';
 
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
@@ -299,6 +300,8 @@ export default function Home() {
         totalModels={totalCount}
         dynamicCount={savedResults.length}
       />
+
+      <DefenseStrategyPanel />
 
       {/* Prepare Panel */}
       {baselines && (

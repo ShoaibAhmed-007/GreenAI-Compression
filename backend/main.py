@@ -189,9 +189,24 @@ CIFAR10_CLASS_ALIASES = {
 
 ASSET_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
+VALID_STRATEGIES = [
+    "smart",
+    "maximize_speed",
+    "minimize_size",
+    "preserve_accuracy",
+    "pruning",
+    "quantization",
+    "hybrid",
+    "kd",
+]
+
 
 def _strategy_label(strategy: str) -> str:
     labels = {
+        "smart": "Auto-Green (Smart)",
+        "maximize_speed": "Preset: Maximize Speed",
+        "minimize_size": "Preset: Minimize Size",
+        "preserve_accuracy": "Preset: Preserve Accuracy",
         "pruning": "Pruned",
         "quantization": "Quantized",
         "hybrid": "Hybrid",
@@ -2979,7 +2994,7 @@ async def compress_preloaded(req: PreloadedCompressRequest):
         )
 
     # Validate method
-    valid_methods = ['pruning', 'quantization', 'hybrid', 'kd']
+    valid_methods = VALID_STRATEGIES
     method = req.method.lower().strip()
     if method not in valid_methods:
         raise HTTPException(
@@ -3124,7 +3139,7 @@ async def dynamic_compress(
     You can optionally specify it if auto-detection fails.
 
     - model_file: The PyTorch model file (state_dict or full model)
-    - strategy: pruning | quantization | hybrid | kd
+    - strategy: smart | maximize_speed | minimize_size | preserve_accuracy | pruning | quantization | hybrid | kd
     - dataset: CIFAR10 | CIFAR100
     - fine_tune_epochs: Number of fine-tuning epochs (default: 5)
     - architecture: auto (default) | resnet18 | resnet34 | resnet50 | mobilenet_v2 | vgg16 | compact_student
@@ -3147,7 +3162,7 @@ async def dynamic_compress(
         )
 
     # Validate strategy
-    valid_strategies = ['pruning', 'quantization', 'hybrid', 'kd']
+    valid_strategies = VALID_STRATEGIES
     if strategy.lower() not in valid_strategies:
         raise HTTPException(
             status_code=400,

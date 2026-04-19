@@ -7,7 +7,7 @@ import { useSearch } from './TopNavbar';
 
 /**
  * Canonical technique tokens supported by every model in the backend.
- * All 11 preloaded models can be compressed with all 4 methods —
+ * All 11 preloaded models can be compressed with Smart, Preset, and Manual layers —
  * see run_compression() in backend/compress.py.
  *
  * Additionally we include common aliases so that searching:
@@ -17,6 +17,12 @@ import { useSearch } from './TopNavbar';
  *   "prune"        → matches 'pruning'
  */
 const ALL_TECHNIQUES = [
+  'smart',
+  'auto green',
+  'auto-green',
+  'maximize speed',
+  'minimize size',
+  'preserve accuracy',
   'pruning',
   'quantization',
   'hybrid',

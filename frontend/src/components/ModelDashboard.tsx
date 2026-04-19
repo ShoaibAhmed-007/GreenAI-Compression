@@ -15,6 +15,10 @@ interface ModelDashboardProps {
 }
 
 const METHODS = [
+  { value: 'smart', label: 'Auto-Green (Smart)', desc: 'Smart router auto-selects best compression path', icon: '\uD83E\uDDE0' },
+  { value: 'maximize_speed', label: 'Preset: Maximize Speed', desc: 'Intent preset -> aggressive INT8 quantization', icon: '\u26A1' },
+  { value: 'minimize_size', label: 'Preset: Minimize Size', desc: 'Intent preset -> 50% hybrid pruning + quantization', icon: '\uD83D\uDCBE' },
+  { value: 'preserve_accuracy', label: 'Preset: Preserve Accuracy', desc: 'Intent preset -> KD with conservative accuracy focus', icon: '\uD83C\uDFAF' },
   { value: 'pruning', label: 'Pruning (70%)', desc: 'Remove 70% of smallest weights + fine-tune + gzip', icon: '✂️' },
   { value: 'quantization', label: 'Quantization (INT8)', desc: 'Dynamic INT8 quantization for weights', icon: '📦' },
   { value: 'hybrid', label: 'Hybrid', desc: 'Prune 50% + fine-tune + quantize INT8', icon: '🔗' },
@@ -36,13 +40,26 @@ const STEP_ICONS: Record<string, string> = {
 };
 
 const STRATEGY_LABELS: Record<string, string> = {
+  smart: 'Auto-Green (Smart)',
+  maximize_speed: 'Preset: Maximize Speed',
+  minimize_size: 'Preset: Minimize Size',
+  preserve_accuracy: 'Preset: Preserve Accuracy',
   pruning: 'Pruning',
   quantization: 'Quantization',
   hybrid: 'Hybrid',
   kd: 'Knowledge Distillation',
 };
 
-const ALL_METHODS = ['pruning', 'quantization', 'hybrid', 'kd'];
+const ALL_METHODS = [
+  'smart',
+  'maximize_speed',
+  'minimize_size',
+  'preserve_accuracy',
+  'pruning',
+  'quantization',
+  'hybrid',
+  'kd',
+];
 
 function toFiniteNumber(value: unknown): number | null {
   if (typeof value === 'number') {
