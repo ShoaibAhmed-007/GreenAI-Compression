@@ -105,6 +105,28 @@ class CompactStudent(nn.Module):
         return x
 
 
+class ResizeInputAdapter(nn.Module):
+    """Resize inputs to a target spatial size before forwarding to wrapped model."""
+
+    def __init__(self, model, target_size):
+        super().__init__()
+        self.model = model
+        self.target_size = int(target_size)
+
+    def forward(self, x):
+        if x.ndim >= 4:
+            h = int(x.shape[-2])
+            w = int(x.shape[-1])
+            if h != self.target_size or w != self.target_size:
+                x = F.interpolate(
+                    x,
+                    size=self.target_size,
+                    mode='bilinear',
+                    align_corners=False,
+                )
+        return self.model(x)
+
+
 # ============================================================
 # Utility Functions
 # ============================================================
@@ -697,7 +719,20 @@ def _finalize_emissions_tracking(tracker, phase_label, started_at):
     return emissions_kg, energy_kwh, round(elapsed_s, 2)
 
 
-def _track_inference_emissions(model, loader, dev, project_name, output_dir, max_batches=None):
+def _is_cuda_oom_error(err):
+    """Return True when an exception matches common CUDA OOM messages."""
+    if err is None:
+        return False
+    msg = str(err).lower()
+    return (
+        "cuda out of memory" in msg
+        or "out of memory" in msg
+        or "cublas_status_alloc_failed" in msg
+    )
+
+
+def _track_inference_emissions(model, loader, dev, project_name, output_dir,
+                               max_batches=None, _oom_retry_depth=0):
     """Run a steady-state inference workload under CodeCarbon.
 
     Notes:
@@ -794,6 +829,32 @@ def _track_inference_emissions(model, loader, dev, project_name, output_dir, max
         print(f"[CodeCarbon] Inference warmup failed: {warmup_error}")
     if inference_error is not None:
         print(f"[CodeCarbon] Inference tracking workload failed: {inference_error}")
+
+    oom_error = warmup_error if _is_cuda_oom_error(warmup_error) else (
+        inference_error if _is_cuda_oom_error(inference_error) else None
+    )
+    if oom_error is not None and str(dev).startswith('cuda') and _oom_retry_depth < 4:
+        current_batch = _get_loader_batch_size(loader, fallback=1)
+        reduced_batch = max(1, current_batch // 2)
+        if reduced_batch < current_batch:
+            print(
+                f"[CodeCarbon] CUDA OOM during {project_name}; retrying with "
+                f"batch_size={reduced_batch} (was {current_batch})."
+            )
+            retry_loader = _rebuild_loader_for_benchmark(loader, reduced_batch, shuffle=False)
+            retry_batch = _get_loader_batch_size(retry_loader, fallback=current_batch)
+            if retry_batch < current_batch:
+                deep_clean_gpu()
+                return _track_inference_emissions(
+                    model,
+                    retry_loader,
+                    dev,
+                    project_name,
+                    output_dir,
+                    max_batches=max_batches,
+                    _oom_retry_depth=_oom_retry_depth + 1,
+                )
+
     if max_batches is not None:
         print(
             "[CodeCarbon] _track_inference_emissions now prioritizes time-window benchmarking; "
@@ -3223,10 +3284,37 @@ def apply_hybrid(model, train_loader, test_loader, device,
     _cb(f"Applying INT8 quantization (QAT on {qat_dev})...")
     model.to(qat_dev)
     model.eval()
-    fallback_float_model = copy.deepcopy(model).cpu().eval()
+    deployment_float_model = _prepare_deployment_float_model(model)
+    fallback_float_model = _safe_model_copy(deployment_float_model).cpu().eval()
+    quant_model = _safe_model_copy(fallback_float_model)
 
     model_key = _slugify_name(model_name)
     use_fp16_safeguard = any(arch in model_key for arch in ["mobilenet", "efficientnet", "shufflenet", "squeezenet", "mnasnet", "densenet", "inception", "googlenet", "vgg"])
+    selected_precision = "fp16" if use_fp16_safeguard else "int8"
+    runtime_precision = selected_precision
+    runtime_backend_used = "Torch Quantization (CPU kernels)"
+    runtime_selection_policy = "default"
+    runtime_candidate_latencies_ms = {}
+    tensorrt_model = None
+    tensorrt_engine_path = ""
+    tensorrt_precision_mode = ""
+    runtime_warnings = []
+    batch_size_used = getattr(train_loader, 'batch_size', None)
+    eval_batch_size = _get_loader_batch_size(
+        test_loader,
+        fallback=input_shape[0] if len(input_shape) > 0 else 1,
+    )
+    latency_input_shape = _shape_with_batch(input_shape, 1)
+    trt_compile_input_shape = _shape_with_batch(input_shape, eval_batch_size)
+    trt_min_block_size = _select_trt_min_block_size(model_key)
+    alternate_tensorrt_model = None
+    alternate_runtime_backend = ""
+    alternate_tensorrt_precision_mode = ""
+    hardware_state = (
+        "Saturated (RTX 5090 Optimization Active)"
+        if _is_rtx_5090(device=device)
+        else "Standard"
+    )
 
     qat_api = _get_quantization_api()
     backend = _configure_quantized_backend()
@@ -3236,10 +3324,43 @@ def apply_hybrid(model, train_loader, test_loader, device,
     hybrid_qat_succeeded = False
     if use_fp16_safeguard:
         _cb(f"Architecture {model_name} detected as complex/fragile; pivoting to FP16 safeguard.")
-        # We don't do QAT for these, we just skip to the final result using the float model
-        # which will be exported to TensorRT FP16 in the next step.
+        # We skip QAT here and prefer an FP16 runtime path.
         hybrid_qat_succeeded = True
         hybrid_quantization_type = "fp16_safeguard"
+        quant_model = _safe_model_copy(fallback_float_model)
+        runtime_precision = "fp16"
+
+        if device.type == 'cuda':
+            tensorrt_engine_path = os.path.splitext(
+                build_compressed_model_path(save_dir, model_name, 'hybrid_fp16_tensorrt')
+            )[0] + '.ts'
+            try:
+                _cb("Exporting hybrid FP16 safeguard model to TensorRT...")
+                tensorrt_model, runtime_backend_used, saved_trt_path, tensorrt_precision_mode = export_to_tensorrt(
+                    _safe_model_copy(deployment_float_model),
+                    trt_compile_input_shape,
+                    tensorrt_engine_path,
+                    prefer_int8=False,
+                    min_block_size=trt_min_block_size,
+                )
+                tensorrt_engine_path = saved_trt_path
+                runtime_precision = tensorrt_precision_mode or "fp16"
+                if tensorrt_engine_path:
+                    _cb("Hybrid TensorRT export succeeded")
+                else:
+                    _cb("Hybrid TensorRT compiled; artifact save skipped")
+            except Exception as trt_err:
+                print(f"[Hybrid] FP16 TensorRT export failed ({type(trt_err).__name__}): {trt_err}")
+                tensorrt_model = None
+                tensorrt_engine_path = ""
+                tensorrt_precision_mode = ""
+                runtime_backend_used = "CUDA FP16 fallback (TensorRT unavailable)"
+                runtime_precision = "fp16"
+                runtime_warnings.append(TENSORRT_RUNTIME_WARNING)
+                _cb("Hybrid TensorRT export failed; continuing with FP16 fallback runtime")
+        else:
+            runtime_backend_used = "FP16 safeguard (CPU runtime)"
+            runtime_precision = "fp16"
     else:
         try:
             # Wrap model with QuantStub/DeQuantStub for architectures that lack native
@@ -3298,12 +3419,69 @@ def apply_hybrid(model, train_loader, test_loader, device,
                     print("[Hybrid/QAT] Accuracy guard triggered; stopping QAT early.")
                     break
             model.load_state_dict(best_state)
-            fallback_float_model = copy.deepcopy(model).cpu().eval()
+            deployment_float_model = _prepare_deployment_float_model(model)
+            fallback_float_model = _safe_model_copy(deployment_float_model).cpu().eval()
+
+            if device.type == 'cuda':
+                tensorrt_engine_path = os.path.splitext(
+                    build_compressed_model_path(save_dir, model_name, 'hybrid_qat_tensorrt')
+                )[0] + '.ts'
+                try:
+                    _cb("Exporting hybrid QAT model to TensorRT (INT8 -> FP16/FP32 fallback)...")
+                    tensorrt_model, runtime_backend_used, saved_trt_path, tensorrt_precision_mode = export_to_tensorrt(
+                        _safe_model_copy(deployment_float_model),
+                        trt_compile_input_shape,
+                        tensorrt_engine_path,
+                        prefer_int8=(selected_precision == "int8"),
+                        min_block_size=trt_min_block_size,
+                    )
+                    tensorrt_engine_path = saved_trt_path
+                    runtime_precision = tensorrt_precision_mode or selected_precision
+                    if tensorrt_engine_path:
+                        _cb("Hybrid TensorRT export succeeded")
+                    else:
+                        _cb("Hybrid TensorRT compiled; artifact save skipped")
+
+                    if tensorrt_precision_mode == "int8":
+                        try:
+                            _cb("Compiling hybrid FP16 TensorRT candidate for runtime selection...")
+                            (
+                                alternate_tensorrt_model,
+                                alternate_runtime_backend,
+                                _alt_saved_trt_path,
+                                alternate_tensorrt_precision_mode,
+                            ) = export_to_tensorrt(
+                                _safe_model_copy(deployment_float_model),
+                                trt_compile_input_shape,
+                                tensorrt_engine_path,
+                                prefer_int8=False,
+                                min_block_size=trt_min_block_size,
+                            )
+                            _cb(
+                                "Hybrid runtime candidate ready: "
+                                f"{alternate_runtime_backend} ({alternate_tensorrt_precision_mode})"
+                            )
+                        except Exception as alt_trt_err:
+                            print(
+                                "[Hybrid] FP16 TensorRT candidate compile failed "
+                                f"({type(alt_trt_err).__name__}): {alt_trt_err}"
+                            )
+                except Exception as trt_err:
+                    print(f"[Hybrid] TensorRT export failed ({type(trt_err).__name__}): {trt_err}")
+                    tensorrt_model = None
+                    tensorrt_engine_path = ""
+                    tensorrt_precision_mode = ""
+                    runtime_backend_used = "Torch Quantization (CPU kernels)"
+                    runtime_precision = "int8_cpu"
+                    runtime_warnings.append(TENSORRT_RUNTIME_WARNING)
+                    _cb("Hybrid TensorRT export failed; continuing with torch quantization path")
+
             model.to(torch.device('cpu'))
             model.eval()
             _call_quant_api_safely(qat_api.convert, model, inplace=True)
             quant_model = model
             hybrid_quantization_type = "qat_int8"
+            runtime_precision = "int8"
             hybrid_qat_succeeded = True
 
         except Exception as qat_err:
@@ -3339,6 +3517,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
             _call_quant_api_safely(qat_api.convert, model_ptsq, inplace=True)
             quant_model = model_ptsq
             hybrid_quantization_type = "ptsq_int8"
+            runtime_precision = "int8"
             hybrid_ptsq_succeeded = True
             _cb("Hybrid PTSQ succeeded")
 
@@ -3349,9 +3528,11 @@ def apply_hybrid(model, train_loader, test_loader, device,
     if not hybrid_qat_succeeded and not hybrid_ptsq_succeeded:
         _cb("Falling back to dynamic quantization (always compatible)...")
         hybrid_quantization_type = "dynamic_int8_fallback"
+        base_for_fallback = _safe_model_copy(fallback_float_model).cpu().eval()
         quant_model = torch.quantization.quantize_dynamic(
-            fallback_float_model, {nn.Linear}, dtype=torch.qint8
+            base_for_fallback, {nn.Linear}, dtype=torch.qint8
         )
+        runtime_precision = "int8"
 
     # Save hybrid model
     _cb("Saving hybrid model...")
@@ -3360,27 +3541,151 @@ def apply_hybrid(model, train_loader, test_loader, device,
         quant_model,
         save_path,
         prefer_sparse=True,
-        include_fp16_variant=False,
+        include_fp16_variant=use_fp16_safeguard,
     )
 
     _cb("Evaluating hybrid model...")
-    cpu_dev = torch.device('cpu')
+    quant_eval_dev = device
+    benchmark_compressed_model = quant_model
+
+    if quant_eval_dev.type == 'cuda':
+        if tensorrt_model is not None:
+            benchmark_compressed_model = tensorrt_model
+            runtime_precision = tensorrt_precision_mode or runtime_precision
+
+            runtime_candidates = [
+                (
+                    f"primary_{runtime_backend_used}_{runtime_precision}",
+                    benchmark_compressed_model,
+                    runtime_backend_used,
+                    runtime_precision,
+                )
+            ]
+            if alternate_tensorrt_model is not None:
+                runtime_candidates.append(
+                    (
+                        f"alternate_{alternate_runtime_backend}_{alternate_tensorrt_precision_mode}",
+                        alternate_tensorrt_model,
+                        alternate_runtime_backend,
+                        alternate_tensorrt_precision_mode,
+                    )
+                )
+
+            if len(runtime_candidates) > 1:
+                best_candidate = None
+                for candidate_label, candidate_model, candidate_backend, candidate_precision in runtime_candidates:
+                    try:
+                        candidate_latency = measure_latency(
+                            candidate_model,
+                            input_shape=latency_input_shape,
+                            dev=quant_eval_dev,
+                            n_runs=50,
+                        )
+                        runtime_candidate_latencies_ms[candidate_label] = candidate_latency
+                        if best_candidate is None or candidate_latency < best_candidate[4]:
+                            best_candidate = (
+                                candidate_label,
+                                candidate_model,
+                                candidate_backend,
+                                candidate_precision,
+                                candidate_latency,
+                            )
+                    except Exception as latency_err:
+                        print(
+                            f"[Hybrid] Runtime candidate latency check failed for "
+                            f"{candidate_label}: {latency_err}"
+                        )
+
+                if best_candidate is not None:
+                    (
+                        _best_label,
+                        benchmark_compressed_model,
+                        runtime_backend_used,
+                        runtime_precision,
+                        _best_latency,
+                    ) = best_candidate
+                    tensorrt_precision_mode = runtime_precision
+                    runtime_selection_policy = "latency_best_of_trt"
+        else:
+            # Quantized torch kernels are CPU-only; use float fallback for GPU-side fair benchmarking.
+            if use_fp16_safeguard:
+                benchmark_compressed_model = (
+                    copy.deepcopy(fallback_float_model).half().to(quant_eval_dev).eval()
+                    if fallback_float_model is not None else copy.deepcopy(model).half().to(quant_eval_dev).eval()
+                )
+                runtime_backend_used = "CUDA FP16 fallback (TensorRT unavailable)"
+                runtime_precision = "fp16"
+            else:
+                benchmark_compressed_model = (
+                    copy.deepcopy(fallback_float_model).to(quant_eval_dev).eval()
+                    if fallback_float_model is not None else copy.deepcopy(model).to(quant_eval_dev).eval()
+                )
+                runtime_backend_used = "CUDA FP32 fallback (TensorRT unavailable)"
+                runtime_precision = "fp32"
+
     try:
-        hybrid_acc = evaluate(quant_model, test_loader, dev=cpu_dev)
+        hybrid_acc = evaluate(benchmark_compressed_model, test_loader, dev=quant_eval_dev)
     except Exception as e:
-        print(f"[Hybrid] Runtime fallback to dynamic quantization: {e}")
-        hybrid_quantization_type = "dynamic_int8_fallback_runtime"
-        quant_model = torch.quantization.quantize_dynamic(
-            fallback_float_model, {nn.Linear}, dtype=torch.qint8
-        )
-        save_path, hybrid_size = save_smallest_artifact(
-            quant_model,
-            save_path,
-            prefer_sparse=True,
-            include_fp16_variant=False,
-        )
-        hybrid_acc = evaluate(quant_model, test_loader, dev=cpu_dev)
-    latency = measure_latency(quant_model, input_shape=input_shape, dev=cpu_dev, n_runs=20)
+        if use_fp16_safeguard:
+            print(f"[Hybrid] Runtime fallback to FP16 safeguard: {e}")
+            base_for_fallback = fallback_float_model if fallback_float_model is not None else model.cpu().eval()
+            if quant_eval_dev.type == 'cuda':
+                benchmark_compressed_model = copy.deepcopy(base_for_fallback).half().to(quant_eval_dev).eval()
+                runtime_backend_used = "CUDA FP16 fallback (runtime guard)"
+                runtime_precision = "fp16"
+            else:
+                benchmark_compressed_model = base_for_fallback
+                runtime_backend_used = "FP16 safeguard (CPU runtime)"
+                runtime_precision = "fp16"
+            hybrid_acc = evaluate(benchmark_compressed_model, test_loader, dev=quant_eval_dev)
+        else:
+            print(f"[Hybrid] Runtime fallback to dynamic quantization: {e}")
+            hybrid_quantization_type = "dynamic_int8_fallback_runtime"
+            base_for_fallback = _safe_model_copy(
+                _prepare_deployment_float_model(
+                    fallback_float_model if fallback_float_model is not None else model
+                )
+            ).cpu().eval()
+            quant_model = torch.quantization.quantize_dynamic(
+                base_for_fallback, {nn.Linear}, dtype=torch.qint8
+            )
+            save_path, hybrid_size = save_smallest_artifact(
+                quant_model,
+                save_path,
+                prefer_sparse=True,
+                include_fp16_variant=False,
+            )
+            if quant_eval_dev.type == 'cuda':
+                benchmark_compressed_model = copy.deepcopy(base_for_fallback).to(quant_eval_dev).eval()
+                runtime_backend_used = "CUDA FP32 fallback (dynamic runtime)"
+                runtime_precision = "fp32"
+            else:
+                benchmark_compressed_model = quant_model
+                runtime_backend_used = "Torch Quantization (dynamic CPU fallback)"
+                runtime_precision = "int8"
+
+            try:
+                hybrid_acc = evaluate(benchmark_compressed_model, test_loader, dev=quant_eval_dev)
+            except Exception as dynamic_err:
+                print(f"[Hybrid] Dynamic quantization runtime fallback failed: {dynamic_err}")
+                hybrid_quantization_type = "float_fallback_runtime"
+                quant_model = base_for_fallback
+                save_path, hybrid_size = save_smallest_artifact(
+                    quant_model,
+                    save_path,
+                    prefer_sparse=True,
+                    include_fp16_variant=False,
+                )
+                if quant_eval_dev.type == 'cuda':
+                    benchmark_compressed_model = copy.deepcopy(base_for_fallback).to(quant_eval_dev).eval()
+                    runtime_backend_used = "CUDA FP32 fallback (float runtime guard)"
+                    runtime_precision = "fp32"
+                else:
+                    benchmark_compressed_model = base_for_fallback
+                    runtime_backend_used = "CPU float fallback (runtime guard)"
+                    runtime_precision = "fp32"
+                hybrid_acc = evaluate(benchmark_compressed_model, test_loader, dev=quant_eval_dev)
+    latency = measure_latency(benchmark_compressed_model, input_shape=latency_input_shape, dev=quant_eval_dev)
 
     (
         inference_emissions_kg,
@@ -3388,31 +3693,32 @@ def apply_hybrid(model, train_loader, test_loader, device,
         inference_duration_s,
         inference_benchmark_meta,
     ) = _track_inference_emissions(
-        quant_model,
+        benchmark_compressed_model,
         test_loader,
-        dev=cpu_dev,
+        dev=quant_eval_dev,
         project_name=f"infer_{_slugify_name(model_name)}_hybrid",
         output_dir=save_dir,
         max_batches=None,
     )
 
+    benchmark_train_model = fallback_float_model if fallback_float_model is not None else model.cpu().eval()
     fair_metrics = _build_fair_comparison_metrics(
         strategy='hybrid',
         baseline_model=baseline_model_for_benchmark,
-        compressed_model=quant_model,
-        compressed_training_model=fallback_float_model,
+        compressed_model=benchmark_compressed_model,
+        compressed_training_model=benchmark_train_model,
         train_loader=train_loader,
         test_loader=test_loader,
-        baseline_dev=cpu_dev,
-        compressed_dev=cpu_dev,
+        baseline_dev=device,
+        compressed_dev=device,
         output_dir=save_dir,
-        baseline_input_shape=input_shape,
-        compressed_input_shape=input_shape,
+        baseline_input_shape=latency_input_shape,
+        compressed_input_shape=latency_input_shape,
         baseline_size_mb=baseline_size,
         compressed_size_mb=hybrid_size,
         benchmark_train_epochs=max(1, min(3, fine_tune_epochs)),
-        benchmark_train_max_batches=80,
-        benchmark_infer_max_batches=None,
+        benchmark_train_max_batches=20,
+        benchmark_infer_max_batches=40,
         baseline_accuracy=baseline_acc,
         compressed_accuracy=hybrid_acc,
     )
@@ -3478,6 +3784,21 @@ def apply_hybrid(model, train_loader, test_loader, device,
         "emissions_kg": compressed_total_co2,
         "co2_kg": compressed_total_co2,
         "energy_kwh": compressed_total_energy,
+        "hardware_target": "NVIDIA RTX 5090",
+        "energy_measurement_method": "CodeCarbon / GPU-Specific Power Draw",
+        "runtime_backend_used": runtime_backend_used,
+        "runtime_precision": runtime_precision,
+        "runtime_selection_policy": runtime_selection_policy,
+        "runtime_candidate_latencies_ms": runtime_candidate_latencies_ms,
+        "latency_batch_size_used": eval_batch_size,
+        "tensorrt_engine_path": tensorrt_engine_path,
+        "tensorrt_precision_mode": tensorrt_precision_mode,
+        "tensorrt_min_block_size": trt_min_block_size,
+        "batch_size_used": batch_size_used,
+        "hardware_state": hardware_state,
+        "acceleration_backend": runtime_backend_used,
+        "runtime_warning": runtime_warnings[-1] if runtime_warnings else "",
+        "runtime_warnings": runtime_warnings,
         "saved_path": save_path,
     }
     return _append_inference_benchmark_fields(
@@ -3622,13 +3943,20 @@ def apply_kd(teacher, train_loader, test_loader, device,
     student_input_shape = (1, input_shape[1], student_size_px, student_size_px)
     latency = measure_latency(student, input_shape=student_input_shape, dev=device)
 
+    kd_benchmark_model = (
+        ResizeInputAdapter(_safe_model_copy(student), student_size_px).to(device).eval()
+        if needs_resize
+        else _safe_model_copy(student).to(device).eval()
+    )
+    kd_benchmark_input_shape = input_shape if needs_resize else student_input_shape
+
     (
         inference_emissions_kg,
         inference_energy_kwh,
         inference_duration_s,
         inference_benchmark_meta,
     ) = _track_inference_emissions(
-        student,
+        kd_benchmark_model,
         test_loader,
         dev=device,
         project_name=f"infer_{_slugify_name(model_name)}_kd",
@@ -3639,15 +3967,15 @@ def apply_kd(teacher, train_loader, test_loader, device,
     fair_metrics = _build_fair_comparison_metrics(
         strategy='kd',
         baseline_model=baseline_model_for_benchmark,
-        compressed_model=student,
-        compressed_training_model=student,
+        compressed_model=kd_benchmark_model,
+        compressed_training_model=kd_benchmark_model,
         train_loader=train_loader,
         test_loader=test_loader,
         baseline_dev=device,
         compressed_dev=device,
         output_dir=save_dir,
         baseline_input_shape=input_shape,
-        compressed_input_shape=student_input_shape,
+        compressed_input_shape=kd_benchmark_input_shape,
         baseline_size_mb=teacher_size,
         compressed_size_mb=student_size,
         benchmark_train_epochs=max(1, min(3, epochs)),
@@ -3848,8 +4176,9 @@ def compress_dynamic(model_path, strategy, dataset='CIFAR10',
             resolved_technique='apply_hybrid',
         )
     elif strategy == 'kd':
+        kd_epochs = max(20, fine_tune_epochs * 4)
         result = apply_kd(model, train_loader, test_loader, device,
-                          num_classes=num_classes, epochs=fine_tune_epochs * 4,
+                          num_classes=num_classes, epochs=kd_epochs,
                           save_dir=save_dir,
                           model_name=uploaded_model_name,
                           accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
@@ -4364,9 +4693,14 @@ def run_compression(model_name, method, dataset='CIFAR10',
             resolved_technique='apply_hybrid',
         )
     elif method == 'kd':
+        kd_epochs = max(20, fine_tune_epochs * 4)
+        print(
+            f"  [KD] Using {kd_epochs} epochs (requested fine_tune_epochs={fine_tune_epochs}) "
+            "for stable student accuracy."
+        )
         result = apply_kd(model, train_loader, test_loader, device,
                           num_classes=num_classes,
-                          epochs=fine_tune_epochs,
+                          epochs=kd_epochs,
                           save_dir=save_dir, progress_cb=compress_cb,
                           model_name=model_key,
                           accuracy_drop_threshold=DEFAULT_ACCURACY_DROP_THRESHOLD)
