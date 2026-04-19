@@ -2130,6 +2130,41 @@ def apply_pruning(model, train_loader, test_loader, device,
     input_shape = detect_input_shape(model)
     baseline_model_for_benchmark = copy.deepcopy(model).to(device)
 
+    # Cap pruning loader batches to reduce CUDA OOM risk on heavier runs.
+    pruning_batch_cap = 512
+    train_batch_size = _get_loader_batch_size(train_loader, fallback=pruning_batch_cap)
+    test_batch_size = _get_loader_batch_size(test_loader, fallback=pruning_batch_cap)
+
+    if train_batch_size > pruning_batch_cap:
+        print(
+            f"[Pruning] Capping train batch size from {train_batch_size} "
+            f"to {pruning_batch_cap} to avoid CUDA OOM."
+        )
+        _cb(
+            f"[Pruning] Capping train batch size from {train_batch_size} "
+            f"to {pruning_batch_cap} to avoid CUDA OOM."
+        )
+        train_loader = _rebuild_loader_for_benchmark(
+            train_loader,
+            pruning_batch_cap,
+            shuffle=True,
+        )
+
+    if test_batch_size > pruning_batch_cap:
+        print(
+            f"[Pruning] Capping test batch size from {test_batch_size} "
+            f"to {pruning_batch_cap} to avoid CUDA OOM."
+        )
+        _cb(
+            f"[Pruning] Capping test batch size from {test_batch_size} "
+            f"to {pruning_batch_cap} to avoid CUDA OOM."
+        )
+        test_loader = _rebuild_loader_for_benchmark(
+            test_loader,
+            pruning_batch_cap,
+            shuffle=False,
+        )
+
     # ✅ Full baseline accuracy
     baseline_acc = evaluate(model, test_loader, dev=device)
 
