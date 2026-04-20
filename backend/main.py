@@ -225,6 +225,39 @@ def _load_compression_history_data() -> dict:
     return {}
 
 
+def _build_synthetic_compression_entry(model_key: str, strategy: str, artifact_path: str) -> dict:
+    """Create a minimal synthetic compression entry from an artifact path.
+
+    This is used when compressed artifacts exist on disk but history metadata
+    was not persisted (for example, CLI-only runs).
+    """
+    try:
+        size_mb = round(os.path.getsize(artifact_path) / 1e6, 2)
+    except Exception:
+        size_mb = None
+
+    normalized_model_key = _normalize_model_key(model_key)
+    normalized_strategy = _normalize_model_key(strategy)
+
+    model_name = normalized_model_key
+    try:
+        from compress import PRELOADED_MODELS
+        model_name = PRELOADED_MODELS.get(normalized_model_key, {}).get("name") or model_name
+    except Exception:
+        pass
+
+    return {
+        "strategy": normalized_strategy,
+        "compression_method": normalized_strategy,
+        "model_key": normalized_model_key,
+        "model_name": model_name,
+        "size_MB": size_mb,
+        "compressed_size_MB": size_mb,
+        "artifact_name": os.path.basename(artifact_path),
+        "history_source": "synthetic_from_artifact",
+    }
+
+
 def _find_compression_history_entry(model_key: str, strategy: str) -> Optional[dict]:
     key = _normalize_model_key(model_key)
     strategy_key = _normalize_model_key(strategy)
@@ -242,6 +275,16 @@ def _find_compression_history_entry(model_key: str, strategy: str) -> Optional[d
             )
             if entry_strategy == strategy_key:
                 return _normalize_compression_result(key, entry)
+
+    artifact_path = _find_compressed_artifact(key, strategy_key)
+    if artifact_path is not None:
+        synthetic_entry = _build_synthetic_compression_entry(
+            key,
+            strategy_key,
+            artifact_path,
+        )
+        return _normalize_compression_result(key, synthetic_entry)
+
     return None
 
 
@@ -1292,6 +1335,49 @@ def _build_model_comparison_options() -> dict:
                 "strategy": strategy,
                 "strategy_label": _strategy_label(strategy),
                 "label": f"{model_name} - {_strategy_label(strategy)}",
+                "size_MB": round(size_mb, 2) if size_mb is not None else None,
+                "co2_kg": co2_kg,
+                "artifact_name": os.path.basename(artifact),
+            }
+
+    # Fallback: include artifacts that exist on disk even if history metadata is missing.
+    for model_key, cfg in PRELOADED_MODELS.items():
+        normalized_model_key = _normalize_model_key(model_key)
+        for strategy in ("pruning", "quantization", "hybrid", "kd"):
+            option_key = f"{normalized_model_key}::{strategy}"
+            if option_key in compressed_map:
+                continue
+
+            artifact = _find_compressed_artifact(normalized_model_key, strategy)
+            if artifact is None:
+                continue
+
+            synthetic_entry = _build_synthetic_compression_entry(
+                normalized_model_key,
+                strategy,
+                artifact,
+            )
+            normalized_entry = _normalize_compression_result(normalized_model_key, synthetic_entry)
+            size_mb = _first_numeric_value(normalized_entry, ("size_MB", "compressed_size_MB"))
+            co2_kg = _first_numeric_value(
+                normalized_entry,
+                (
+                    "compressed_total_emissions_kg",
+                    "compressed_benchmark_total_emissions_kg",
+                    "inference_co2_kg",
+                    "inference_emissions_kg",
+                    "co2_kg",
+                    "emissions_kg",
+                ),
+            )
+
+            compressed_map[option_key] = {
+                "key": option_key,
+                "model_key": normalized_model_key,
+                "model_name": cfg.get("name") or normalized_model_key,
+                "strategy": strategy,
+                "strategy_label": _strategy_label(strategy),
+                "label": f"{cfg.get('name') or normalized_model_key} - {_strategy_label(strategy)}",
                 "size_MB": round(size_mb, 2) if size_mb is not None else None,
                 "co2_kg": co2_kg,
                 "artifact_name": os.path.basename(artifact),

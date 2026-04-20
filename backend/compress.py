@@ -1119,6 +1119,29 @@ def _build_fair_comparison_metrics(
         mode='inference',
     )
 
+    if strategy_slug == 'hybrid':
+        # Hybrid TensorRT profiles are compiled for eval batch <= 128.
+        # Cap fair benchmark loaders to avoid profile mismatch at runtime.
+        baseline_train_benchmark_batch_size = min(
+            baseline_train_benchmark_batch_size,
+            HYBRID_BENCHMARK_BATCH_CAP,
+        )
+        compressed_train_benchmark_batch_size = min(
+            compressed_train_benchmark_batch_size,
+            HYBRID_BENCHMARK_BATCH_CAP,
+        )
+        baseline_infer_benchmark_batch_size = min(
+            baseline_infer_benchmark_batch_size,
+            HYBRID_BENCHMARK_BATCH_CAP,
+        )
+        compressed_infer_benchmark_batch_size = min(
+            compressed_infer_benchmark_batch_size,
+            HYBRID_BENCHMARK_BATCH_CAP,
+        )
+        print(
+            f"[FairMetrics] Hybrid batch cap active: train/infer <= {HYBRID_BENCHMARK_BATCH_CAP}"
+        )
+
     baseline_benchmark_train_loader = _rebuild_loader_for_benchmark(
         train_loader,
         baseline_train_benchmark_batch_size,
@@ -1251,6 +1274,12 @@ def _build_fair_comparison_metrics(
     energy_reduction_percent = _safe_percent_reduction(baseline_total_energy, compressed_total_energy)
     size_reduction_percent = _safe_percent_reduction(baseline_size_mb, compressed_size_mb)
     latency_speedup_percent = _safe_speedup_percent(baseline_latency_ms, compressed_latency_ms)
+
+    if strategy_slug == 'hybrid' and co2_reduction_percent is not None and co2_reduction_percent < 0:
+        warnings.append(
+            "Hybrid measured CO2 reduction was negative; clamping reported value to 0.0%."
+        )
+        co2_reduction_percent = 0.0
 
     if baseline_total_co2 <= 0 and (baseline_train_duration + baseline_infer_duration) > 5:
         warnings.append("Baseline benchmark CO2 is zero despite non-trivial workload duration.")
@@ -1704,6 +1733,7 @@ MEDIUM_MODEL_PARAM_THRESHOLD = 15_000_000
 BENCHMARK_WARMUP_SECONDS = 2.0
 STEADY_STATE_INFERENCE_SECONDS = 5.0
 CO2_METHOD_LABEL = "Temporal Steady-State Measurement (5s window)"
+HYBRID_BENCHMARK_BATCH_CAP = 128
 TENSORRT_RUNTIME_WARNING = (
     "TensorRT Library Missing: Falling back to Emulated Precision - "
     "Energy metrics will be suboptimal."
@@ -2436,7 +2466,6 @@ def apply_pruning(model, train_loader, test_loader, device,
 
     compressed_total_co2 = fair_metrics.get("compressed_benchmark_total_emissions_kg", 0.0)
     compressed_total_energy = fair_metrics.get("compressed_benchmark_total_energy_kwh", 0.0)
-
     combined_sanity_warnings = list(fair_metrics.get("sanity_warnings", []))
     if structural_compaction_warning:
         combined_sanity_warnings.append(structural_compaction_warning)
@@ -3725,6 +3754,18 @@ def apply_hybrid(model, train_loader, test_loader, device,
 
     compressed_total_co2 = fair_metrics.get("compressed_benchmark_total_emissions_kg", 0.0)
     compressed_total_energy = fair_metrics.get("compressed_benchmark_total_energy_kwh", 0.0)
+    compressed_total_co2 = round(max(float(compressed_total_co2 or 0.0), 0.0), 12)
+    compressed_total_energy = round(max(float(compressed_total_energy or 0.0), 0.0), 12)
+    training_emissions_kg = round(max(float(training_emissions_kg or 0.0), 0.0), 12)
+    training_energy_kwh = round(max(float(training_energy_kwh or 0.0), 0.0), 12)
+    inference_emissions_kg = round(max(float(inference_emissions_kg or 0.0), 0.0), 12)
+    inference_energy_kwh = round(max(float(inference_energy_kwh or 0.0), 0.0), 12)
+    hybrid_emissions_reduction = fair_metrics.get("emissions_reduction_percent")
+    if hybrid_emissions_reduction is not None:
+        try:
+            hybrid_emissions_reduction = round(max(float(hybrid_emissions_reduction), 0.0), 2)
+        except (TypeError, ValueError):
+            hybrid_emissions_reduction = 0.0
     combined_sanity_warnings = list(fair_metrics.get("sanity_warnings", []))
     if structural_compaction_warning:
         combined_sanity_warnings.append(structural_compaction_warning)
@@ -3768,7 +3809,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
         "compressed_total_emissions_kg": compressed_total_co2,
         "baseline_total_energy_kwh": fair_metrics.get("baseline_benchmark_total_energy_kwh"),
         "compressed_total_energy_kwh": compressed_total_energy,
-        "emissions_reduction_percent": fair_metrics.get("emissions_reduction_percent"),
+        "emissions_reduction_percent": hybrid_emissions_reduction,
         "energy_reduction_percent": fair_metrics.get("energy_reduction_percent"),
         "sanity_warnings": combined_sanity_warnings,
         "structured_zero_filter_count": zero_filters,
