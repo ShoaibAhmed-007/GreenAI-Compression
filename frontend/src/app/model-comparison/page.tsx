@@ -223,7 +223,7 @@ export default function ModelComparisonPage() {
         </p>
       </header>
 
-      <DefenseStrategyPanel compact />
+      {/* <DefenseStrategyPanel compact /> */}
 
       {(initialError || formError || error) && (
         <div className="bg-error-container/10 rounded-xl p-3 text-sm text-on-error-container ghost-border">

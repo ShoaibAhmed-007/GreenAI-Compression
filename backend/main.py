@@ -203,6 +203,19 @@ VALID_STRATEGIES = [
     "kd",
 ]
 
+# Runtime no-retraining fallbacks for known degraded or incompatible artifacts.
+# Keys and values are normalized as "<model_key>::<strategy>".
+COMPRESSED_SELECTION_FALLBACKS = {
+    "densenet121::kd": "densenet121::quantization",
+    "efficientnet_b0::kd": "efficientnet_b0::quantization",
+    "efficientnet_b1::pruning": "efficientnet_b1::quantization",
+    "googlenet::pruning": "googlenet::quantization",
+    "inception_v3::quantization": "inception_v3::pruning",
+    "resnet18::hybrid": "resnet18::pruning",
+    "resnet18::quantization": "resnet18::pruning",
+    "resnet34::quantization": "resnet34::pruning",
+}
+
 
 def _strategy_label(strategy: str) -> str:
     labels = {
@@ -752,6 +765,55 @@ def _parse_compressed_model_selection(compressed_key_raw: str) -> tuple[str, str
     return model_key, strategy_key
 
 
+def _resolve_compressed_selection_with_fallback(model_key: str, strategy: str) -> dict[str, Any]:
+    requested_model_key = _normalize_model_key(model_key)
+    requested_strategy = _normalize_model_key(strategy)
+    requested_key = f"{requested_model_key}::{requested_strategy}"
+
+    resolution = {
+        "requested_model_key": requested_model_key,
+        "requested_strategy": requested_strategy,
+        "requested_key": requested_key,
+        "effective_model_key": requested_model_key,
+        "effective_strategy": requested_strategy,
+        "effective_key": requested_key,
+        "fallback_applied": False,
+        "fallback_reason": None,
+    }
+
+    if os.getenv("GREENAI_DISABLE_COMPRESSED_FALLBACK", "0") == "1":
+        return resolution
+
+    fallback_key = COMPRESSED_SELECTION_FALLBACKS.get(requested_key)
+    if not fallback_key:
+        return resolution
+
+    try:
+        effective_model_key, effective_strategy = _parse_compressed_model_selection(fallback_key)
+    except ValueError:
+        logger.warning(
+            "[ModelCompare] Invalid fallback mapping ignored for %s -> %s",
+            requested_key,
+            fallback_key,
+        )
+        return resolution
+
+    resolution.update({
+        "effective_model_key": effective_model_key,
+        "effective_strategy": effective_strategy,
+        "effective_key": f"{effective_model_key}::{effective_strategy}",
+        "fallback_applied": True,
+        "fallback_reason": "runtime_artifact_compatibility",
+    })
+
+    logger.warning(
+        "[ModelCompare] Applying compressed fallback %s -> %s",
+        requested_key,
+        resolution["effective_key"],
+    )
+    return resolution
+
+
 def _build_preloaded_model_architecture(model_key: str, num_classes: int = 10):
     from compress import PRELOADED_MODELS
 
@@ -848,7 +910,12 @@ def _normalize_loaded_state_dict(state: dict) -> dict:
     return normalized
 
 
-def _load_state_dict_best_effort(model: nn.Module, state: dict):
+def _load_state_dict_best_effort(
+    model: nn.Module,
+    state: dict,
+    *,
+    min_match_ratio: float = 0.0,
+):
     try:
         model.load_state_dict(state, strict=True)
         return
@@ -860,6 +927,17 @@ def _load_state_dict_best_effort(model: nn.Module, state: dict):
     matched = len(model_keys & state_keys)
     if matched == 0:
         raise ValueError("No matching keys found between model architecture and saved artifact.")
+
+    model_key_count = max(1, len(model_keys))
+    match_ratio = float(matched) / float(model_key_count)
+    if match_ratio < float(min_match_ratio):
+        raise ValueError(
+            (
+                "Insufficient state-dict key overlap for safe best-effort load: "
+                f"matched={matched}/{model_key_count} ({match_ratio:.2%}), "
+                f"required>={float(min_match_ratio):.2%}."
+            )
+        )
 
     model.load_state_dict(state, strict=False)
 
@@ -916,7 +994,13 @@ def _load_compressed_model_for_comparison(model_key: str, strategy: str, device)
         model = loaded
     elif isinstance(loaded, dict):
         normalized_state = _normalize_loaded_state_dict(loaded)
-        _load_state_dict_best_effort(model, normalized_state)
+        _load_state_dict_best_effort(
+            model,
+            normalized_state,
+            # Compressed artifacts should almost always match architecture exactly.
+            # Reject weak partial loads to avoid silent accuracy collapse.
+            min_match_ratio=0.95,
+        )
     else:
         raise ValueError("Compressed artifact is not a state dict or nn.Module.")
 
@@ -1194,15 +1278,21 @@ def _predict_model_on_asset_images_batch(
     device,
     enable_tta: bool = False,
 ) -> list[dict]:
-    """Preprocess Assets images at model-native input size before batched inference."""
+    """Preprocess Assets images with CIFAR-style normalization before inference.
+
+    Important: baselines/compressed models are trained on CIFAR data whose native
+    resolution is 32x32. For consistency with training and batch-compare routes,
+    we first collapse each image to 32x32, normalize, then resize to model-native
+    input size only when required.
+    """
     if not images:
         return []
 
     model_input_size = _get_model_input_size(model)
     temperature = _resolve_comparison_temperature()
 
-    resize = transforms.Resize(
-        (model_input_size, model_input_size),
+    cifar_resize = transforms.Resize(
+        (CIFAR10_INPUT_SIZE, CIFAR10_INPUT_SIZE),
         interpolation=transforms.InterpolationMode.BICUBIC,
     )
     to_tensor = transforms.ToTensor()
@@ -1222,8 +1312,15 @@ def _predict_model_on_asset_images_batch(
         normalization_stats: dict[str, float] = {}
 
         for idx, variant in enumerate(variants):
-            raw_tensor = to_tensor(resize(variant))
+            raw_tensor = to_tensor(cifar_resize(variant))
             normalized_tensor = normalize(raw_tensor.clone())
+            if model_input_size != CIFAR10_INPUT_SIZE:
+                normalized_tensor = F.interpolate(
+                    normalized_tensor.unsqueeze(0),
+                    size=(model_input_size, model_input_size),
+                    mode='bilinear',
+                    align_corners=False,
+                ).squeeze(0)
             normalized_variants.append(normalized_tensor)
 
             if idx == 0:
@@ -1231,7 +1328,7 @@ def _predict_model_on_asset_images_batch(
                     raw_tensor,
                     normalized_tensor,
                     blur_edge_score,
-                    expected_size=model_input_size,
+                    expected_size=CIFAR10_INPUT_SIZE,
                 )
 
         probs = _predict_probabilities_for_batch(
@@ -1338,6 +1435,7 @@ def _build_model_comparison_options() -> dict:
                 "size_MB": round(size_mb, 2) if size_mb is not None else None,
                 "co2_kg": co2_kg,
                 "artifact_name": os.path.basename(artifact),
+                "fallback_to": COMPRESSED_SELECTION_FALLBACKS.get(option_key),
             }
 
     # Fallback: include artifacts that exist on disk even if history metadata is missing.
@@ -1381,6 +1479,7 @@ def _build_model_comparison_options() -> dict:
                 "size_MB": round(size_mb, 2) if size_mb is not None else None,
                 "co2_kg": co2_kg,
                 "artifact_name": os.path.basename(artifact),
+                "fallback_to": COMPRESSED_SELECTION_FALLBACKS.get(option_key),
             }
 
     compressed_models = sorted(
@@ -1855,9 +1954,18 @@ async def compare_image(
         raise HTTPException(status_code=400, detail="Baseline model key is required.")
 
     try:
-        compressed_model_key_norm, compressed_strategy = _parse_compressed_model_selection(compressed_model_key)
+        requested_compressed_model_key, requested_compressed_strategy = _parse_compressed_model_selection(
+            compressed_model_key
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    selection = _resolve_compressed_selection_with_fallback(
+        requested_compressed_model_key,
+        requested_compressed_strategy,
+    )
+    compressed_model_key_norm = str(selection["effective_model_key"])
+    compressed_strategy = str(selection["effective_strategy"])
 
     history_entry = _find_compression_history_entry(compressed_model_key_norm, compressed_strategy)
     if history_entry is None:
@@ -2004,6 +2112,12 @@ async def compare_image(
         "compressed": {
             "model_key": compressed_model_key_norm,
             "strategy": compressed_strategy,
+            "requested_model_key": str(selection["requested_model_key"]),
+            "requested_strategy": str(selection["requested_strategy"]),
+            "requested_key": str(selection["requested_key"]),
+            "effective_key": str(selection["effective_key"]),
+            "fallback_applied": bool(selection["fallback_applied"]),
+            "fallback_reason": selection.get("fallback_reason"),
             "class": compressed_pred.get("predicted_class"),
             "confidence": compressed_pred.get("confidence"),
             "top3": compressed_pred.get("top_k", []),
@@ -2024,7 +2138,7 @@ async def compare_image(
             "quality_warnings": quality_warnings,
         },
         "preprocessing": {
-            "resize": "model_native",
+            "resize": "cifar32_then_model_native",
             "baseline_input_size": int(baseline_pred.get("input_size", _get_model_input_size(baseline_model))),
             "compressed_input_size": int(compressed_pred.get("input_size", _get_model_input_size(compressed_model))),
             "normalize_mean": list(CIFAR10_MEAN),
@@ -2035,6 +2149,7 @@ async def compare_image(
                 int(compressed_pred.get("tta_variants", 1)),
             )),
         },
+        "selection": selection,
         "device": str(device),
     }
 
@@ -2043,17 +2158,19 @@ async def compare_image(
 async def compare_models_on_image(req: ModelComparisonRequest):
     """Run baseline and compressed model inference on one selected Assets image."""
     baseline_key = _normalize_model_key(req.baseline_model_key)
-    compressed_key_raw = (req.compressed_model_key or "").strip()
-
-    if "::" not in compressed_key_raw:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid compressed model selection format. Expected '<model_key>::<strategy>'.",
+    try:
+        requested_compressed_model_key, requested_compressed_strategy = _parse_compressed_model_selection(
+            req.compressed_model_key
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-    compressed_model_key_raw, compressed_strategy_raw = compressed_key_raw.split("::", 1)
-    compressed_model_key = _normalize_model_key(compressed_model_key_raw)
-    compressed_strategy = _normalize_model_key(compressed_strategy_raw)
+    selection = _resolve_compressed_selection_with_fallback(
+        requested_compressed_model_key,
+        requested_compressed_strategy,
+    )
+    compressed_model_key = str(selection["effective_model_key"])
+    compressed_strategy = str(selection["effective_strategy"])
 
     if not baseline_key:
         raise HTTPException(status_code=400, detail="Baseline model key is required.")
@@ -2305,6 +2422,12 @@ async def compare_models_on_image(req: ModelComparisonRequest):
         "compressed": {
             "model_key": compressed_model_key,
             "strategy": compressed_strategy,
+            "requested_model_key": str(selection["requested_model_key"]),
+            "requested_strategy": str(selection["requested_strategy"]),
+            "requested_key": str(selection["requested_key"]),
+            "effective_key": str(selection["effective_key"]),
+            "fallback_applied": bool(selection["fallback_applied"]),
+            "fallback_reason": selection.get("fallback_reason"),
             "model_name": history_entry.get("model_name") or compressed_model_key,
             "strategy_label": _strategy_label(compressed_strategy),
             "prediction": compressed_pred,
@@ -2353,7 +2476,7 @@ async def compare_models_on_image(req: ModelComparisonRequest):
             "compressed_top3": compressed_pred.get("top_k", []),
         },
         "preprocessing": {
-            "resize": "model_native",
+            "resize": "cifar32_then_model_native",
             "baseline_input_size": int(baseline_pred.get("input_size", _get_model_input_size(baseline_model))),
             "compressed_input_size": int(compressed_pred.get("input_size", _get_model_input_size(compressed_model))),
             "normalize_mean": list(CIFAR10_MEAN),
@@ -2365,6 +2488,7 @@ async def compare_models_on_image(req: ModelComparisonRequest):
                 int(compressed_pred.get("tta_variants", 1)),
             )),
         },
+        "selection": selection,
         "device": str(device),
     }
 
@@ -2379,15 +2503,19 @@ async def compare_models_on_batch(req: ModelComparisonBatchRequest):
         raise HTTPException(status_code=400, detail="sample_ids exceeds limit (256).")
 
     baseline_key = _normalize_model_key(req.baseline_model_key)
-    compressed_key_raw = (req.compressed_model_key or "").strip()
-    if "::" not in compressed_key_raw:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid compressed model selection format. Expected '<model_key>::<strategy>'.",
+    try:
+        requested_compressed_model_key, requested_compressed_strategy = _parse_compressed_model_selection(
+            req.compressed_model_key
         )
-    compressed_model_key_raw, compressed_strategy_raw = compressed_key_raw.split("::", 1)
-    compressed_model_key = _normalize_model_key(compressed_model_key_raw)
-    compressed_strategy = _normalize_model_key(compressed_strategy_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    selection = _resolve_compressed_selection_with_fallback(
+        requested_compressed_model_key,
+        requested_compressed_strategy,
+    )
+    compressed_model_key = str(selection["effective_model_key"])
+    compressed_strategy = str(selection["effective_strategy"])
 
     history_entry = _find_compression_history_entry(compressed_model_key, compressed_strategy)
     if history_entry is None:
@@ -2595,6 +2723,12 @@ async def compare_models_on_batch(req: ModelComparisonBatchRequest):
         "baseline_model_key": baseline_key,
         "compressed_model_key": compressed_model_key,
         "compressed_strategy": compressed_strategy,
+        "requested_compressed_model_key": str(selection["requested_model_key"]),
+        "requested_compressed_strategy": str(selection["requested_strategy"]),
+        "requested_compressed_key": str(selection["requested_key"]),
+        "effective_compressed_key": str(selection["effective_key"]),
+        "fallback_applied": bool(selection["fallback_applied"]),
+        "fallback_reason": selection.get("fallback_reason"),
         "compressed_artifact": os.path.basename(compressed_artifact),
         "results": results,
         "summary": {
@@ -2613,7 +2747,7 @@ async def compare_models_on_batch(req: ModelComparisonBatchRequest):
             "significant_confidence_drop_cases": significant_confidence_drop_cases,
         },
         "preprocessing": {
-            "resize": "model_native",
+            "resize": "cifar32_then_model_native",
             "baseline_input_size": int(baseline_model_input_size),
             "compressed_input_size": int(compressed_model_input_size),
             "normalize_mean": list(CIFAR10_MEAN),
@@ -2622,6 +2756,7 @@ async def compare_models_on_batch(req: ModelComparisonBatchRequest):
             "tta_enabled": bool(req.enable_tta),
             "assets_dir": os.path.relpath(active_assets_root, os.path.join(BACKEND_DIR, "..")).replace("\\", "/"),
         },
+        "selection": selection,
         "device": str(device),
     }
 

@@ -301,7 +301,7 @@ export default function Home() {
         dynamicCount={savedResults.length}
       />
 
-      <DefenseStrategyPanel />
+    {/* <DefenseStrategyPanel /> */}
 
       {/* Prepare Panel */}
       {baselines && (
