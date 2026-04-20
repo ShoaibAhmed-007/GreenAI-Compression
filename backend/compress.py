@@ -3320,6 +3320,17 @@ def apply_hybrid(model, train_loader, test_loader, device,
     model_key = _slugify_name(model_name)
     use_fp16_safeguard = any(arch in model_key for arch in ["mobilenet", "efficientnet", "shufflenet", "squeezenet", "mnasnet", "densenet", "inception", "googlenet", "vgg"])
     selected_precision = "fp16" if use_fp16_safeguard else "int8"
+    # Hybrid INT8 TensorRT frequently fails on calibration when no explicit scales
+    # are available; keep it opt-in to avoid noisy hard errors in normal runs.
+    hybrid_allow_trt_int8 = str(
+        os.environ.get("GREENAI_ENABLE_HYBRID_TRT_INT8", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    prefer_hybrid_trt_int8 = (selected_precision == "int8") and hybrid_allow_trt_int8
+    if selected_precision == "int8" and not prefer_hybrid_trt_int8:
+        _cb(
+            "Hybrid TensorRT INT8 is disabled by default (calibration guard). "
+            "Set GREENAI_ENABLE_HYBRID_TRT_INT8=1 to opt in."
+        )
     runtime_precision = selected_precision
     runtime_backend_used = "Torch Quantization (CPU kernels)"
     runtime_selection_policy = "default"
@@ -3461,7 +3472,7 @@ def apply_hybrid(model, train_loader, test_loader, device,
                         _safe_model_copy(deployment_float_model),
                         trt_compile_input_shape,
                         tensorrt_engine_path,
-                        prefer_int8=(selected_precision == "int8"),
+                        prefer_int8=prefer_hybrid_trt_int8,
                         min_block_size=trt_min_block_size,
                     )
                     tensorrt_engine_path = saved_trt_path
