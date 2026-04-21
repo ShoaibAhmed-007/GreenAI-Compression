@@ -17,6 +17,51 @@ function toFiniteNumber(value: unknown): number | null {
   return null;
 }
 
+function readPath(source: Record<string, unknown>, path: string): unknown {
+  const segments = path.split('.');
+  let current: unknown = source;
+
+  for (const segment of segments) {
+    if (!current || typeof current !== 'object') {
+      return undefined;
+    }
+    const record = current as Record<string, unknown>;
+    if (!(segment in record)) {
+      return undefined;
+    }
+    current = record[segment];
+  }
+
+  return current;
+}
+
+function firstFiniteValue(result: DynamicResult, keys: string[]): number | null {
+  const raw = result as unknown as Record<string, unknown>;
+
+  for (const key of keys) {
+    const value = key.includes('.') ? readPath(raw, key) : raw[key];
+    const numeric = toFiniteNumber(value);
+    if (numeric != null) {
+      return numeric;
+    }
+  }
+
+  return null;
+}
+
+function firstTextValue(result: DynamicResult, keys: string[]): string | null {
+  const raw = result as unknown as Record<string, unknown>;
+
+  for (const key of keys) {
+    const value = key.includes('.') ? readPath(raw, key) : raw[key];
+    if (typeof value === 'string' && value.trim() !== '') {
+      return value;
+    }
+  }
+
+  return null;
+}
+
 function formatPercent(value: number | null): string {
   if (value == null) return 'Not Available';
   return `${value.toFixed(2)}%`;
@@ -72,38 +117,111 @@ function formatStrategyToken(value: string): string {
 
 function strategyLabel(result: DynamicResult | null): string {
   if (!result) return 'Not Available';
-  const raw = String(result.strategy || result.compression_method || '').trim();
+  const raw = String(
+    result.strategy ||
+      result.compression_method ||
+      firstTextValue(result, ['effective_strategy', 'resolved_strategy', 'resolved_technique']) ||
+      ''
+  ).trim();
   if (raw === '') return 'Not Available';
   return formatStrategyToken(raw);
 }
 
 function resolveAccuracy(result: DynamicResult | null): number | null {
   if (!result) return null;
-  return toFiniteNumber(result.compressed_accuracy ?? null);
+  return firstFiniteValue(result, [
+    'compressed_accuracy',
+    'accuracy',
+    'accuracy_top1',
+    'top1_accuracy',
+    'comparison.full_dataset_metrics.compressed_accuracy_percent',
+    'observed_compressed_accuracy_percent',
+    'expected_compressed_accuracy_percent',
+    'batch_result.summary.compressed_accuracy_percent',
+  ]);
 }
 
 function resolveLatency(result: DynamicResult | null): number | null {
   if (!result) return null;
-  return toFiniteNumber(result.compressed_latency_ms ?? result.latency_ms ?? null);
+  return firstFiniteValue(result, [
+    'compressed_latency_ms',
+    'latency_ms',
+    'inference_latency_ms',
+    'comparison.full_dataset_metrics.compressed_latency_ms',
+    'batch_result.summary.compressed_latency_ms',
+  ]);
 }
 
 function resolveSize(result: DynamicResult | null): number | null {
   if (!result) return null;
-  return toFiniteNumber(result.compressed_size_MB ?? result.size_MB ?? null);
+  return firstFiniteValue(result, [
+    'compressed_size_MB',
+    'size_MB',
+    'size_MB_quant',
+    'size_MB_sparse',
+    'size_MB_compressed',
+    'comparison.full_dataset_metrics.compressed_size_MB',
+  ]);
 }
 
 function resolveCo2(result: DynamicResult | null): number | null {
   if (!result) return null;
-  return toFiniteNumber(
-    result.compressed_total_emissions_kg ??
-      result.training_co2_kg ??
-      result.training_emissions_kg ??
-      result.inference_co2_kg ??
-      result.inference_emissions_kg ??
-      result.co2_kg ??
-      result.emissions_kg ??
-      null
-  );
+  return firstFiniteValue(result, [
+    'compressed_total_emissions_kg',
+    'compressed_co2_kg',
+    'co2_kg',
+    'emissions_kg',
+    'inference_co2_kg',
+    'inference_emissions_kg',
+    'training_co2_kg',
+    'training_emissions_kg',
+    'comparison.full_dataset_metrics.compressed_co2_kg',
+  ]);
+}
+
+function resolveEnergyPer1k(result: DynamicResult | null): number | null {
+  if (!result) return null;
+
+  const direct = firstFiniteValue(result, [
+    'energy_per_1k_images',
+    'comparison.full_dataset_metrics.energy_per_1k_images',
+  ]);
+  if (direct != null) {
+    return direct;
+  }
+
+  const totalEnergy = firstFiniteValue(result, [
+    'inference_energy_kwh',
+    'energy_kwh',
+    'compressed_total_energy_kwh',
+  ]);
+  const processedImages = firstFiniteValue(result, [
+    'inference_images_processed',
+    'sample_count',
+    'batch_result.aggregate.sample_count',
+  ]);
+
+  if (totalEnergy != null && processedImages != null && processedImages > 0) {
+    return (totalEnergy / processedImages) * 1000;
+  }
+
+  return null;
+}
+
+function resolveSaturation(result: DynamicResult | null): number | null {
+  if (!result) return null;
+
+  const value = firstFiniteValue(result, [
+    'hardware_saturation_level',
+    'utilization_ratio',
+    'gpu_utilization_ratio',
+  ]);
+
+  if (value == null) return null;
+  if (value > 1 && value <= 100) {
+    return value / 100;
+  }
+  return value;
 }
 
 export function CompressionResults({ result }: CompressionResultsProps) {
@@ -119,10 +237,12 @@ export function CompressionResults({ result }: CompressionResultsProps) {
   const latency = resolveLatency(result);
   const size = resolveSize(result);
   const co2 = resolveCo2(result);
-  const energyPer1k = toFiniteNumber(result.energy_per_1k_images ?? null);
-  const saturation = toFiniteNumber(result.hardware_saturation_level ?? null);
-  const co2Method = result.co2_method || 'Not Available';
-  const bottleneck = result.bottleneck_analysis || 'Not Available';
+  const energyPer1k = resolveEnergyPer1k(result);
+  const saturation = resolveSaturation(result);
+  const co2Method =
+    firstTextValue(result, ['co2_method', 'emissions_method', 'benchmark.method']) || 'Not Available';
+  const bottleneck =
+    firstTextValue(result, ['bottleneck_analysis', 'bottleneck', 'diagnosis.summary']) || 'Not Available';
   const smartRoute = result.strategy === 'smart' ? (result.smart_router_strategy || result.resolved_strategy) : null;
   const resolvedTechnique = result.resolved_technique ? formatStrategyToken(result.resolved_technique) : null;
   const userIntentLayer = result.user_intent_layer || null;

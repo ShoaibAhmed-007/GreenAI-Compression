@@ -13,6 +13,23 @@ function formatCo2(value: number | undefined): string {
   return `${value.toFixed(6)} kg`;
 }
 
+function formatPercent(value: number | undefined): string {
+  if (value == null || !Number.isFinite(value)) return 'Not Available';
+  return `${value.toFixed(2)}%`;
+}
+
+function formatSize(value: number | undefined): string {
+  if (value == null || !Number.isFinite(value)) return 'Not Available';
+  return `${value.toFixed(2)} MB`;
+}
+
+function straightLabel(value: string): string {
+  return value
+    .replace(/\s*·\s*/g, ' - ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function ComparisonTable({ strategies, onDeleteStrategy }: ComparisonTableProps) {
   if (!strategies.length) {
     return (
@@ -70,7 +87,7 @@ export function ComparisonTable({ strategies, onDeleteStrategy }: ComparisonTabl
                       {isBest && <span className="badge-green">Best</span>}
                       {isBaseline && <span className="badge-blue">Base</span>}
                       <span className={`font-medium ${isBaseline ? 'text-on-surface-variant' : 'text-on-surface'}`}>
-                        {s.name}
+                        {straightLabel(s.name)}
                       </span>
                     </div>
                   </td>
@@ -79,18 +96,18 @@ export function ComparisonTable({ strategies, onDeleteStrategy }: ComparisonTabl
                       s.accuracy >= (strategies[0]?.accuracy || 0)
                         ? 'text-primary' : 'text-secondary'
                     }>
-                      {s.accuracy}%
+                      {formatPercent(s.accuracy)}
                     </span>
                   </td>
                   <td className="py-3 px-4 text-right font-technical text-on-surface">
-                    {s.size_MB} MB
+                    {formatSize(s.size_MB)}
                   </td>
                   <td className="py-3 px-4 text-right font-technical">
                     {isBaseline ? (
                       <span className="text-on-surface-variant/40">—</span>
                     ) : (
                       <span className={s.size_reduction > 0 ? 'text-primary' : 'text-error'}>
-                        {s.size_reduction > 0 ? '↓' : '↑'} {Math.abs(s.size_reduction)}%
+                        {s.size_reduction > 0 ? '↓' : '↑'} {Math.abs(s.size_reduction).toFixed(2)}%
                       </span>
                     )}
                   </td>

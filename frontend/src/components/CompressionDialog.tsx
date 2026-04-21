@@ -8,6 +8,8 @@ import {
   compressPreloaded,
   getCompressionStatus,
   getCompressionHistory,
+  getModelComparisonOptions,
+  loadSavedResults,
 } from '@/lib/api';
 import { CompressionResults } from './CompressionResults';
 
@@ -30,24 +32,117 @@ const TECHNIQUES = [
   { key: 'kd', label: 'Distillation' },
 ] as const;
 
+const TECHNIQUE_RESULT_FALLBACKS: Record<string, string[]> = {
+  smart: ['smart', 'maximize_speed', 'minimize_size', 'preserve_accuracy', 'quantization', 'hybrid', 'kd', 'pruning'],
+  maximize_speed: ['maximize_speed', 'quantization', 'hybrid'],
+  minimize_size: ['minimize_size', 'hybrid', 'kd', 'pruning', 'quantization'],
+  preserve_accuracy: ['preserve_accuracy', 'kd', 'quantization', 'hybrid', 'pruning'],
+  pruning: ['pruning'],
+  quantization: ['quantization'],
+  hybrid: ['hybrid'],
+  kd: ['kd'],
+};
+
 function normalizeModelKey(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, '_');
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/[^a-z0-9_]/g, '');
 }
 
 function normalizeTechnique(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, '_');
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/apply_/g, '')
+    .replace(/-/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/[^a-z0-9_]/g, '');
+}
+
+function canonicalTechnique(value: string): string {
+  const normalized = normalizeTechnique(value);
+
+  const aliases: Record<string, string> = {
+    smart_router: 'smart',
+    auto_green: 'smart',
+    auto: 'smart',
+    max_speed: 'maximize_speed',
+    speed: 'maximize_speed',
+    fastest: 'maximize_speed',
+    min_size: 'minimize_size',
+    smallest: 'minimize_size',
+    preserve_acc: 'preserve_accuracy',
+    preserve: 'preserve_accuracy',
+    prune: 'pruning',
+    pruned: 'pruning',
+    pruning_sparse: 'pruning',
+    magnitude_pruning: 'pruning',
+    quantized: 'quantization',
+    quantization_static: 'quantization',
+    quantization_dynamic: 'quantization',
+    static_quantization: 'quantization',
+    dynamic_quantization: 'quantization',
+    int8_quantization: 'quantization',
+    knowledge_distillation: 'kd',
+    distillation: 'kd',
+    kd_compact_student: 'kd',
+    hybrid_student_quant: 'hybrid',
+  };
+
+  return aliases[normalized] || normalized;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function scoreResultQuality(result: DynamicResult): number {
+  let score = 0;
+  if (toFiniteNumber(result.compressed_accuracy) != null) score += 2;
+  if (toFiniteNumber(result.size_MB) != null || toFiniteNumber(result.compressed_size_MB) != null) score += 2;
+  if (
+    toFiniteNumber(result.compressed_total_emissions_kg) != null ||
+    toFiniteNumber(result.training_co2_kg) != null ||
+    toFiniteNumber(result.inference_co2_kg) != null ||
+    toFiniteNumber(result.co2_kg) != null ||
+    toFiniteNumber(result.emissions_kg) != null
+  ) {
+    score += 2;
+  }
+  if (toFiniteNumber(result.compressed_latency_ms) != null || toFiniteNumber(result.latency_ms) != null) score += 1;
+  return score;
 }
 
 function pickLatestResultPerTechnique(results: DynamicResult[]): Record<string, DynamicResult> {
   const latestByTechnique: Record<string, DynamicResult> = {};
 
   for (const result of results) {
-    const key = normalizeTechnique(String(result.strategy || result.compression_method || ''));
+    const key = canonicalTechnique(String(result.strategy || result.compression_method || ''));
     if (!key) continue;
 
     const current = latestByTechnique[key];
     if (!current) {
       latestByTechnique[key] = result;
+      continue;
+    }
+
+    const incomingFromDirect = typeof result.source_result_file === 'string' && result.source_result_file.trim() !== '';
+    const currentFromDirect = typeof current.source_result_file === 'string' && current.source_result_file.trim() !== '';
+    if (incomingFromDirect && !currentFromDirect) {
+      latestByTechnique[key] = result;
+      continue;
+    }
+    if (!incomingFromDirect && currentFromDirect) {
       continue;
     }
 
@@ -60,10 +155,31 @@ function pickLatestResultPerTechnique(results: DynamicResult[]): Record<string, 
     }
     if (Number.isFinite(incomingTs) && Number.isFinite(currentTs) && incomingTs >= currentTs) {
       latestByTechnique[key] = result;
+      continue;
+    }
+
+    if (!Number.isFinite(incomingTs) && !Number.isFinite(currentTs)) {
+      if (scoreResultQuality(result) >= scoreResultQuality(current)) {
+        latestByTechnique[key] = result;
+      }
     }
   }
 
   return latestByTechnique;
+}
+
+function resolveTechniqueResult(
+  techniqueKey: string,
+  resultsByTechnique: Record<string, DynamicResult>
+): DynamicResult | null {
+  const candidates = TECHNIQUE_RESULT_FALLBACKS[techniqueKey] || [techniqueKey];
+  for (const key of candidates) {
+    const candidate = resultsByTechnique[key];
+    if (candidate) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function formatPercent(value?: number): string {
@@ -101,6 +217,7 @@ export function CompressionDialog({
   const elapsedRef = useRef<NodeJS.Timeout | null>(null);
 
   const allTechniqueKeys = useMemo(() => TECHNIQUES.map((t) => t.key), []);
+  const techniqueKeySet = useMemo(() => new Set<string>(allTechniqueKeys), [allTechniqueKeys]);
   const isReadyModel = model?.status === 'ready';
   const isRunning = runningMode !== null;
 
@@ -160,29 +277,147 @@ export function CompressionDialog({
       setLoading(true);
       setError(null);
 
-      const historyPayload = await getCompressionHistory();
+      const [historyPayloadResult, comparisonOptionsResult] = await Promise.allSettled([
+        getCompressionHistory(),
+        getModelComparisonOptions(),
+      ]);
+
       const normalizedTarget = normalizeModelKey(modelKey);
 
-      const matchingEntries = Object.entries(historyPayload.history || {})
-        .filter(([key]) => normalizeModelKey(key) === normalizedTarget)
-        .flatMap(([, entries]) => entries || []);
+      const historyEntries = historyPayloadResult.status === 'fulfilled'
+        ? Object.entries(historyPayloadResult.value.history || {})
+          .filter(([key]) => normalizeModelKey(key) === normalizedTarget)
+          .flatMap(([, entries]) => entries || [])
+        : [];
 
-      const normalizedResults = matchingEntries.filter(
-        (entry) => normalizeTechnique(String(entry.strategy || entry.compression_method || '')) !== 'baseline'
-      );
+      const persistedEntries = loadSavedResults().filter((entry) => {
+        const entryModelKey = normalizeModelKey(String(entry.model_key || entry.model_name || ''));
+        return entryModelKey === normalizedTarget;
+      });
+
+      const optionFallbackEntries: DynamicResult[] = comparisonOptionsResult.status === 'fulfilled'
+        ? (comparisonOptionsResult.value.compressed_models || [])
+          .filter((option) => normalizeModelKey(String(option.model_key || '')) === normalizedTarget)
+          .map((option) => {
+            const canonical = canonicalTechnique(String(option.strategy || ''));
+            const sizeMB =
+              toFiniteNumber(option.compressed_size_MB) ??
+              toFiniteNumber(option.size_MB) ??
+              Number.NaN;
+            const baselineSize =
+              toFiniteNumber(option.baseline_size_MB) ??
+              toFiniteNumber(model?.size_MB);
+            const baselineAccuracy =
+              toFiniteNumber(option.baseline_accuracy) ??
+              toFiniteNumber(option.observed_baseline_accuracy_percent) ??
+              toFiniteNumber(model?.accuracy) ??
+              Number.NaN;
+            const compressedAccuracy =
+              toFiniteNumber(option.compressed_accuracy) ??
+              toFiniteNumber(option.observed_compressed_accuracy_percent) ??
+              toFiniteNumber(option.expected_compressed_accuracy_percent) ??
+              Number.NaN;
+            const baselineLatency = toFiniteNumber(option.baseline_latency_ms);
+            const compressedLatency =
+              toFiniteNumber(option.compressed_latency_ms) ??
+              toFiniteNumber(option.latency_ms);
+            const sizeReduction =
+              toFiniteNumber(option.size_reduction_percent) ??
+              (baselineSize != null && Number.isFinite(sizeMB) && baselineSize > 0
+                ? ((sizeMB - baselineSize) / baselineSize) * -100
+                : Number.NaN);
+            const baselineTrainingCo2 =
+              toFiniteNumber(option.training_co2_kg) ??
+              toFiniteNumber(model?.training_co2_kg);
+            const baselineTotalCo2 =
+              toFiniteNumber(option.baseline_total_emissions_kg) ??
+              baselineTrainingCo2;
+            const compressedTotalCo2 =
+              toFiniteNumber(option.compressed_total_emissions_kg) ??
+              toFiniteNumber(option.co2_kg);
+            const baselineTrainingEnergy =
+              toFiniteNumber(option.training_energy_kwh) ??
+              toFiniteNumber(model?.training_energy_kwh);
+            const baselineTotalEnergy =
+              toFiniteNumber(option.baseline_total_energy_kwh) ??
+              baselineTrainingEnergy;
+            const compressedTotalEnergy =
+              toFiniteNumber(option.compressed_total_energy_kwh) ??
+              toFiniteNumber(option.energy_kwh);
+
+            return {
+              strategy: canonical,
+              compression_method: canonical,
+              model_name: option.model_name,
+              model_key: option.model_key,
+              source_result_file: option.source_result_file || undefined,
+              saved_at: option.saved_at || option.summary_generated_at || undefined,
+              baseline_accuracy: baselineAccuracy,
+              compressed_accuracy: compressedAccuracy,
+              size_MB: sizeMB,
+              compressed_size_MB: sizeMB,
+              baseline_size_MB: baselineSize ?? Number.NaN,
+              size_reduction_percent: sizeReduction,
+              baseline_latency_ms: baselineLatency ?? undefined,
+              compressed_latency_ms: compressedLatency ?? undefined,
+              latency_ms: compressedLatency ?? undefined,
+              latency_speedup_percent: toFiniteNumber(option.latency_speedup_percent) ?? undefined,
+              baseline_training_co2_kg: baselineTrainingCo2 ?? undefined,
+              baseline_total_emissions_kg: baselineTotalCo2 ?? undefined,
+              compressed_total_emissions_kg: compressedTotalCo2 ?? undefined,
+              emissions_kg: compressedTotalCo2 ?? Number.NaN,
+              co2_kg: compressedTotalCo2 ?? undefined,
+              baseline_training_energy_kwh: baselineTrainingEnergy ?? undefined,
+              baseline_total_energy_kwh: baselineTotalEnergy ?? undefined,
+              compressed_total_energy_kwh: compressedTotalEnergy ?? undefined,
+              energy_kwh: compressedTotalEnergy ?? undefined,
+              training_energy_kwh: baselineTrainingEnergy ?? undefined,
+              inference_co2_kg: toFiniteNumber(option.inference_co2_kg) ?? undefined,
+              inference_energy_kwh: toFiniteNumber(option.inference_energy_kwh) ?? undefined,
+              emissions_reduction_percent: toFiniteNumber(option.emissions_reduction_percent) ?? undefined,
+              energy_reduction_percent: toFiniteNumber(option.energy_reduction_percent) ?? undefined,
+              co2_method: option.co2_method || undefined,
+              bottleneck_analysis: option.bottleneck_analysis || undefined,
+            };
+          })
+        : [];
+
+      const mergedEntries: DynamicResult[] = [
+        ...historyEntries,
+        ...persistedEntries,
+        ...optionFallbackEntries,
+      ];
+
+      const normalizedResults = mergedEntries
+        .map((entry) => {
+          const canonical = canonicalTechnique(String(entry.strategy || entry.compression_method || ''));
+          return {
+            ...entry,
+            strategy: canonical,
+            compression_method: canonical,
+          };
+        })
+        .filter((entry) => {
+          const key = canonicalTechnique(String(entry.strategy || entry.compression_method || ''));
+          return key !== 'baseline' && techniqueKeySet.has(key);
+        });
 
       const latest = pickLatestResultPerTechnique(normalizedResults);
       setResultsByTechnique(latest);
 
       const firstAvailable = TECHNIQUES.find((t) => Boolean(latest[t.key]))?.key || TECHNIQUES[0].key;
       setSelectedTechnique(firstAvailable);
+
+      if (historyPayloadResult.status === 'rejected' && comparisonOptionsResult.status === 'rejected' && persistedEntries.length === 0) {
+        setError('Failed to fetch compression results for selected model.');
+      }
     } catch (err: any) {
       setError(err?.message || 'Failed to fetch compression results for selected model.');
       setResultsByTechnique({});
     } finally {
       setLoading(false);
     }
-  }, [modelKey]);
+  }, [model, modelKey, techniqueKeySet]);
 
   useEffect(() => {
     if (!open || !modelKey) return;
@@ -202,7 +437,7 @@ export function CompressionDialog({
   }, [open, onClose]);
 
   const selectedResult = useMemo(
-    () => resultsByTechnique[selectedTechnique] || null,
+    () => resolveTechniqueResult(selectedTechnique, resultsByTechnique),
     [resultsByTechnique, selectedTechnique]
   );
 
@@ -310,7 +545,7 @@ export function CompressionDialog({
             <h4 className="text-xs font-bold text-on-surface-variant uppercase tracking-widest">Compression Techniques</h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
               {TECHNIQUES.map((technique) => {
-                const hasResult = Boolean(resultsByTechnique[technique.key]);
+                const hasResult = Boolean(resolveTechniqueResult(technique.key, resultsByTechnique));
                 const isActive = selectedTechnique === technique.key;
                 return (
                   <button

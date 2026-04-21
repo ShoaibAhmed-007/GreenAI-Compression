@@ -238,6 +238,87 @@ def _load_compression_history_data() -> dict:
     return {}
 
 
+def _parse_model_strategy_from_result_filename(filename: str) -> tuple[str, str]:
+    """Infer model key and strategy from '<model>_<strategy>_compression_result.json'."""
+    suffix = "_compression_result.json"
+    if not filename.endswith(suffix):
+        return "", ""
+
+    stem = filename[: -len(suffix)]
+    if "_" not in stem:
+        return "", ""
+
+    model_part, strategy_part = stem.rsplit("_", 1)
+    return _normalize_model_key(model_part), _normalize_model_key(strategy_part)
+
+
+def _load_direct_compression_results_data() -> dict:
+    """Load latest direct compression results from per-technique result files.
+
+    Returns a map keyed by '<model_key>::<strategy>' where values are normalized
+    compression result payloads sourced from '*_compression_result.json'.
+    """
+    result_files = glob.glob(os.path.join(RESULTS_DIR, "*_compression_result.json"))
+    if not result_files:
+        return {}
+
+    direct_map = {}
+
+    for path in result_files:
+        filename = os.path.basename(path)
+
+        try:
+            with open(path, "r") as f:
+                payload = json.load(f)
+        except Exception:
+            continue
+
+        if not isinstance(payload, dict):
+            continue
+
+        model_key = _normalize_model_key(str(payload.get("model_key") or ""))
+        strategy = _normalize_model_key(
+            str(payload.get("strategy") or payload.get("compression_method") or "")
+        )
+
+        if not model_key or not strategy:
+            inferred_model_key, inferred_strategy = _parse_model_strategy_from_result_filename(filename)
+            model_key = model_key or inferred_model_key
+            strategy = strategy or inferred_strategy
+
+        if not model_key or not strategy or strategy == "baseline":
+            continue
+
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+
+        normalized = _normalize_compression_result(model_key, payload)
+        normalized["model_key"] = model_key
+        normalized["strategy"] = strategy
+        normalized["compression_method"] = strategy
+        normalized["source_result_file"] = filename
+
+        saved_at = normalized.get("saved_at")
+        if not isinstance(saved_at, str) or saved_at.strip() == "":
+            normalized["saved_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime))
+
+        composite_key = f"{model_key}::{strategy}"
+        existing = direct_map.get(composite_key)
+        if existing is None or mtime >= existing.get("mtime", 0.0):
+            direct_map[composite_key] = {
+                "mtime": mtime,
+                "payload": normalized,
+            }
+
+    return {
+        key: value.get("payload")
+        for key, value in direct_map.items()
+        if isinstance(value, dict) and isinstance(value.get("payload"), dict)
+    }
+
+
 def _build_synthetic_compression_entry(model_key: str, strategy: str, artifact_path: str) -> dict:
     """Create a minimal synthetic compression entry from an artifact path.
 
@@ -274,6 +355,12 @@ def _build_synthetic_compression_entry(model_key: str, strategy: str, artifact_p
 def _find_compression_history_entry(model_key: str, strategy: str) -> Optional[dict]:
     key = _normalize_model_key(model_key)
     strategy_key = _normalize_model_key(strategy)
+
+    direct_results = _load_direct_compression_results_data()
+    direct_entry = direct_results.get(f"{key}::{strategy_key}")
+    if isinstance(direct_entry, dict):
+        return _normalize_compression_result(key, direct_entry)
+
     history = _load_compression_history_data()
     for hist_key, entries in history.items():
         if _normalize_model_key(hist_key) != key:
@@ -1369,7 +1456,135 @@ def _predict_model_on_asset_images_batch(
 def _build_model_comparison_options() -> dict:
     from compress import PRELOADED_MODELS
 
+    def _load_latest_frontend_summary_metrics() -> dict:
+        """Load per-option observed metrics from the newest compressed frontend summary file."""
+        patterns = (
+            "compressed_frontend_sample*_summary.json",
+            "compressed_frontend_*_summary.json",
+        )
+        summary_files = []
+        for pattern in patterns:
+            summary_files.extend(glob.glob(os.path.join(RESULTS_DIR, pattern)))
+
+        if not summary_files:
+            return {}
+
+        metrics_by_option = {}
+
+        def _summary_sort_key(path: str) -> float:
+            try:
+                return os.path.getmtime(path)
+            except OSError:
+                return 0.0
+
+        for summary_path in sorted(set(summary_files), key=_summary_sort_key, reverse=True):
+            try:
+                with open(summary_path, "r") as f:
+                    payload = json.load(f)
+            except Exception:
+                continue
+
+            if not isinstance(payload, dict):
+                continue
+
+            options = payload.get("options")
+            if not isinstance(options, list):
+                continue
+
+            generated_at = payload.get("generated_at")
+
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+
+                composite_key = str(option.get("compressed_model_key") or "").strip()
+                if "::" in composite_key:
+                    model_part, strategy_part = composite_key.split("::", 1)
+                else:
+                    model_part = option.get("model_key") or option.get("compressed_model_key") or ""
+                    strategy_part = option.get("strategy") or option.get("compressed_strategy") or ""
+
+                model_key = _normalize_model_key(str(model_part))
+                strategy = _normalize_model_key(str(strategy_part))
+                if not model_key or not strategy:
+                    continue
+
+                option_key = f"{model_key}::{strategy}"
+                metrics = {
+                    "summary_generated_at": generated_at,
+                    "observed_baseline_accuracy_percent": _first_numeric_value(
+                        option,
+                        ("observed_baseline_accuracy_percent",),
+                    ),
+                    "observed_compressed_accuracy_percent": _first_numeric_value(
+                        option,
+                        ("observed_compressed_accuracy_percent", "expected_compressed_accuracy_percent"),
+                    ),
+                    "expected_compressed_accuracy_percent": _first_numeric_value(
+                        option,
+                        ("expected_compressed_accuracy_percent",),
+                    ),
+                    "compressed_accuracy_delta_percent": _first_numeric_value(
+                        option,
+                        ("compressed_accuracy_delta_percent",),
+                    ),
+                    "fallback_applied": option.get("fallback_applied"),
+                    "effective_model_key": _normalize_model_key(str(option.get("effective_model_key") or model_key)),
+                    "effective_strategy": _normalize_model_key(str(option.get("effective_strategy") or strategy)),
+                    "details_file": option.get("details_file"),
+                }
+
+                details_file = option.get("details_file")
+                if isinstance(details_file, str) and details_file.strip() != "":
+                    details_payload = load_json(details_file)
+                    if isinstance(details_payload, dict):
+                        batch_result = details_payload.get("batch_result")
+                        if isinstance(batch_result, dict):
+                            batch_summary = batch_result.get("summary")
+                            if isinstance(batch_summary, dict):
+                                if metrics.get("observed_baseline_accuracy_percent") is None:
+                                    metrics["observed_baseline_accuracy_percent"] = _first_numeric_value(
+                                        batch_summary,
+                                        ("baseline_accuracy_percent",),
+                                    )
+                                if metrics.get("observed_compressed_accuracy_percent") is None:
+                                    metrics["observed_compressed_accuracy_percent"] = _first_numeric_value(
+                                        batch_summary,
+                                        ("compressed_accuracy_percent",),
+                                    )
+                                metrics["observed_baseline_latency_ms_per_image"] = _first_numeric_value(
+                                    batch_summary,
+                                    ("baseline_latency_ms_per_image",),
+                                )
+                                metrics["observed_compressed_latency_ms_per_image"] = _first_numeric_value(
+                                    batch_summary,
+                                    ("compressed_latency_ms_per_image",),
+                                )
+                                metrics["prediction_agreement_percent"] = _first_numeric_value(
+                                    batch_summary,
+                                    ("prediction_agreement_percent",),
+                                )
+
+                            metrics["sample_count"] = _first_numeric_value(
+                                details_payload,
+                                ("sample_count", "batch_result.count"),
+                            )
+
+                # Remove null placeholders to keep payload compact.
+                metrics_by_option[option_key] = {
+                    key: value
+                    for key, value in metrics.items()
+                    if value is not None
+                }
+
+            if metrics_by_option:
+                break
+
+        return metrics_by_option
+
     baseline_metrics = load_baseline_results()
+    frontend_summary_metrics = _load_latest_frontend_summary_metrics()
+    direct_results = _load_direct_compression_results_data()
     baseline_models = []
     for key, cfg in PRELOADED_MODELS.items():
         metrics = baseline_metrics.get(key, {})
@@ -1383,7 +1598,109 @@ def _build_model_comparison_options() -> dict:
             "status": metrics.get("status", "ready" if key in baseline_metrics else "not_ready"),
         })
 
+    def _build_option_payload(model_key: str, strategy: str, normalized_entry: dict, artifact_path: Optional[str]) -> dict:
+        option_key = f"{model_key}::{strategy}"
+        model_name = (
+            normalized_entry.get("model_name")
+            or PRELOADED_MODELS.get(model_key, {}).get("name")
+            or model_key
+        )
+
+        size_mb = _first_numeric_value(normalized_entry, ("size_MB", "compressed_size_MB"))
+        co2_kg = _first_numeric_value(
+            normalized_entry,
+            (
+                "compressed_total_emissions_kg",
+                "compressed_benchmark_total_emissions_kg",
+                "inference_co2_kg",
+                "inference_emissions_kg",
+                "co2_kg",
+                "emissions_kg",
+            ),
+        )
+
+        option_payload = {
+            "key": option_key,
+            "model_key": model_key,
+            "model_name": model_name,
+            "strategy": strategy,
+            "strategy_label": _strategy_label(strategy),
+            "label": f"{model_name} - {_strategy_label(strategy)}",
+            "size_MB": round(size_mb, 2) if size_mb is not None else None,
+            "co2_kg": co2_kg,
+            "artifact_name": os.path.basename(artifact_path) if artifact_path else normalized_entry.get("artifact_name"),
+            "fallback_to": COMPRESSED_SELECTION_FALLBACKS.get(option_key),
+            "saved_at": normalized_entry.get("saved_at"),
+            "source_result_file": normalized_entry.get("source_result_file"),
+            "baseline_accuracy": _first_numeric_value(normalized_entry, ("baseline_accuracy",)),
+            "compressed_accuracy": _first_numeric_value(
+                normalized_entry,
+                ("compressed_accuracy", "accuracy", "accuracy_top1"),
+            ),
+            "baseline_size_MB": _first_numeric_value(normalized_entry, ("baseline_size_MB", "original_size_MB")),
+            "compressed_size_MB": _first_numeric_value(normalized_entry, ("compressed_size_MB", "size_MB")),
+            "size_reduction_percent": _first_numeric_value(normalized_entry, ("size_reduction_percent",)),
+            "baseline_latency_ms": _first_numeric_value(normalized_entry, ("baseline_latency_ms",)),
+            "compressed_latency_ms": _first_numeric_value(normalized_entry, ("compressed_latency_ms", "latency_ms")),
+            "latency_ms": _first_numeric_value(normalized_entry, ("latency_ms", "compressed_latency_ms")),
+            "latency_speedup_percent": _first_numeric_value(normalized_entry, ("latency_speedup_percent",)),
+            "baseline_total_emissions_kg": _first_numeric_value(normalized_entry, ("baseline_total_emissions_kg", "baseline_training_co2_kg")),
+            "compressed_total_emissions_kg": _first_numeric_value(normalized_entry, ("compressed_total_emissions_kg", "co2_kg", "emissions_kg")),
+            "training_co2_kg": _first_numeric_value(normalized_entry, ("training_co2_kg", "training_emissions_kg")),
+            "inference_co2_kg": _first_numeric_value(normalized_entry, ("inference_co2_kg", "inference_emissions_kg")),
+            "baseline_total_energy_kwh": _first_numeric_value(normalized_entry, ("baseline_total_energy_kwh", "baseline_training_energy_kwh")),
+            "compressed_total_energy_kwh": _first_numeric_value(normalized_entry, ("compressed_total_energy_kwh", "energy_kwh")),
+            "training_energy_kwh": _first_numeric_value(normalized_entry, ("training_energy_kwh",)),
+            "inference_energy_kwh": _first_numeric_value(normalized_entry, ("inference_energy_kwh",)),
+            "energy_kwh": _first_numeric_value(normalized_entry, ("energy_kwh", "compressed_total_energy_kwh")),
+            "emissions_reduction_percent": _first_numeric_value(normalized_entry, ("emissions_reduction_percent",)),
+            "energy_reduction_percent": _first_numeric_value(normalized_entry, ("energy_reduction_percent",)),
+            "co2_method": normalized_entry.get("co2_method") or normalized_entry.get("energy_measurement_method"),
+            "bottleneck_analysis": normalized_entry.get("bottleneck_analysis") or normalized_entry.get("runtime_backend_used"),
+        }
+
+        summary_metrics = frontend_summary_metrics.get(option_key)
+        if isinstance(summary_metrics, dict):
+            # Keep observed sample-level metrics as extra metadata, but do not override direct metrics.
+            for key, value in summary_metrics.items():
+                if key not in option_payload:
+                    option_payload[key] = value
+                elif key.startswith("observed_") or key in (
+                    "expected_compressed_accuracy_percent",
+                    "compressed_accuracy_delta_percent",
+                    "prediction_agreement_percent",
+                    "sample_count",
+                    "summary_generated_at",
+                    "details_file",
+                    "fallback_applied",
+                    "effective_model_key",
+                    "effective_strategy",
+                ):
+                    option_payload[key] = value
+
+        return {
+            key: value
+            for key, value in option_payload.items()
+            if value is not None
+        }
+
     compressed_map = {}
+
+    # 1) Authoritative source: direct per-technique result files.
+    for option_key, direct_entry in direct_results.items():
+        if not isinstance(direct_entry, dict) or "::" not in option_key:
+            continue
+
+        model_key, strategy = option_key.split("::", 1)
+        model_key = _normalize_model_key(model_key)
+        strategy = _normalize_model_key(strategy)
+        if not model_key or not strategy or strategy == "baseline":
+            continue
+
+        artifact = _find_compressed_artifact(model_key, strategy)
+        compressed_map[option_key] = _build_option_payload(model_key, strategy, direct_entry, artifact)
+
+    # 2) Secondary source: persisted history, only when direct result is missing.
     history = _load_compression_history_data()
     for hist_key, entries in history.items():
         model_key = _normalize_model_key(hist_key)
@@ -1402,41 +1719,12 @@ def _build_model_comparison_options() -> dict:
             if not strategy or strategy == "baseline":
                 continue
 
-            artifact = _find_compressed_artifact(model_key, strategy)
-            if artifact is None:
+            option_key = f"{model_key}::{strategy}"
+            if option_key in compressed_map:
                 continue
 
-            option_key = f"{model_key}::{strategy}"
-            model_name = (
-                normalized_entry.get("model_name")
-                or PRELOADED_MODELS.get(model_key, {}).get("name")
-                or model_key
-            )
-            size_mb = _first_numeric_value(normalized_entry, ("size_MB", "compressed_size_MB"))
-            co2_kg = _first_numeric_value(
-                normalized_entry,
-                (
-                    "compressed_total_emissions_kg",
-                    "compressed_benchmark_total_emissions_kg",
-                    "inference_co2_kg",
-                    "inference_emissions_kg",
-                    "co2_kg",
-                    "emissions_kg",
-                ),
-            )
-
-            compressed_map[option_key] = {
-                "key": option_key,
-                "model_key": model_key,
-                "model_name": model_name,
-                "strategy": strategy,
-                "strategy_label": _strategy_label(strategy),
-                "label": f"{model_name} - {_strategy_label(strategy)}",
-                "size_MB": round(size_mb, 2) if size_mb is not None else None,
-                "co2_kg": co2_kg,
-                "artifact_name": os.path.basename(artifact),
-                "fallback_to": COMPRESSED_SELECTION_FALLBACKS.get(option_key),
-            }
+            artifact = _find_compressed_artifact(model_key, strategy)
+            compressed_map[option_key] = _build_option_payload(model_key, strategy, normalized_entry, artifact)
 
     # Fallback: include artifacts that exist on disk even if history metadata is missing.
     for model_key, cfg in PRELOADED_MODELS.items():
@@ -1456,31 +1744,9 @@ def _build_model_comparison_options() -> dict:
                 artifact,
             )
             normalized_entry = _normalize_compression_result(normalized_model_key, synthetic_entry)
-            size_mb = _first_numeric_value(normalized_entry, ("size_MB", "compressed_size_MB"))
-            co2_kg = _first_numeric_value(
-                normalized_entry,
-                (
-                    "compressed_total_emissions_kg",
-                    "compressed_benchmark_total_emissions_kg",
-                    "inference_co2_kg",
-                    "inference_emissions_kg",
-                    "co2_kg",
-                    "emissions_kg",
-                ),
-            )
-
-            compressed_map[option_key] = {
-                "key": option_key,
-                "model_key": normalized_model_key,
-                "model_name": cfg.get("name") or normalized_model_key,
-                "strategy": strategy,
-                "strategy_label": _strategy_label(strategy),
-                "label": f"{cfg.get('name') or normalized_model_key} - {_strategy_label(strategy)}",
-                "size_MB": round(size_mb, 2) if size_mb is not None else None,
-                "co2_kg": co2_kg,
-                "artifact_name": os.path.basename(artifact),
-                "fallback_to": COMPRESSED_SELECTION_FALLBACKS.get(option_key),
-            }
+            if not normalized_entry.get("model_name"):
+                normalized_entry["model_name"] = cfg.get("name") or normalized_model_key
+            compressed_map[option_key] = _build_option_payload(normalized_model_key, strategy, normalized_entry, artifact)
 
     compressed_models = sorted(
         compressed_map.values(),
@@ -2877,14 +3143,7 @@ async def prepare_status():
 @app.get("/api/compression-history")
 async def get_compression_history():
     """Get all saved compression results, organized by model."""
-    path = os.path.join(RESULTS_DIR, "compression_history.json")
-    if not os.path.exists(path):
-        return {"history": {}}
-    with open(path, "r") as f:
-        history = json.load(f)
-
-    if not isinstance(history, dict):
-        return {"history": {}}
+    history = _load_compression_history_data()
 
     normalized_history = {}
     for model_key, entries in history.items():
@@ -2896,6 +3155,33 @@ async def get_compression_history():
             for entry in entries
             if isinstance(entry, dict)
         ]
+
+    # Authoritative override: direct per-technique result files always win.
+    direct_results = _load_direct_compression_results_data()
+    for composite_key, direct_entry in direct_results.items():
+        if not isinstance(direct_entry, dict) or "::" not in composite_key:
+            continue
+
+        model_key, strategy = composite_key.split("::", 1)
+        canonical_key = _normalize_model_key(model_key)
+        strategy_key = _normalize_model_key(strategy)
+        if not canonical_key or not strategy_key:
+            continue
+
+        normalized_entry = _normalize_compression_result(canonical_key, direct_entry)
+        existing_entries = normalized_history.get(canonical_key, [])
+        filtered_entries = []
+        for item in existing_entries:
+            if not isinstance(item, dict):
+                continue
+            item_strategy = _normalize_model_key(
+                str(item.get("strategy") or item.get("compression_method") or "")
+            )
+            if item_strategy != strategy_key:
+                filtered_entries.append(item)
+
+        filtered_entries.append(normalized_entry)
+        normalized_history[canonical_key] = filtered_entries
 
     return {"history": normalized_history}
 

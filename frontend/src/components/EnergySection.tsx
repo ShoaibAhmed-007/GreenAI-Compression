@@ -38,6 +38,13 @@ function formatEnergy(value: number | null): string {
   return value == null ? 'Not Available' : `${value.toFixed(8)} kWh`;
 }
 
+function straightLabel(value: string): string {
+  return value
+    .replace(/\s*·\s*/g, ' - ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function EnergySection({
   energy,
   savedResults = [],
@@ -56,17 +63,27 @@ export function EnergySection({
   const comparisonRows = dedupedResults
     .filter((result) => (result.strategy || '').toLowerCase() !== 'baseline')
     .map((result) => {
+      const rawResult = result as unknown as Record<string, unknown>;
       const modelKey = normalizeModelKey(result.model_key || result.model_name);
       const baseline = baselines[modelKey];
 
       const baselineCo2 = toFiniteNumber(
-        baseline?.training_co2_kg ?? result.baseline_training_co2_kg ?? result.baseline_total_emissions_kg
+        result.baseline_total_emissions_kg ??
+          result.baseline_training_co2_kg ??
+          baseline?.training_co2_kg ??
+          rawResult.baseline_co2_kg ??
+          rawResult.baseline_emissions_kg
       );
       const compressedTrainCo2 = toFiniteNumber(result.training_co2_kg ?? result.training_emissions_kg);
       const compressedInferCo2 = toFiniteNumber(
         result.inference_co2_kg ?? result.inference_emissions_kg ?? result.emissions_kg
       );
-      const compressedCo2 = toFiniteNumber(result.compressed_total_emissions_kg) ?? compressedInferCo2 ?? compressedTrainCo2;
+      const compressedCo2 = toFiniteNumber(
+        result.compressed_total_emissions_kg ??
+          rawResult.compressed_training_co2_kg ??
+          rawResult.compressed_co2_kg ??
+          rawResult.compressed_emissions_kg
+      ) ?? compressedInferCo2 ?? compressedTrainCo2;
 
       const reductionPercent =
         baselineCo2 != null && baselineCo2 > 0 && compressedCo2 != null
@@ -78,7 +95,7 @@ export function EnergySection({
 
       return {
         key: getResultStorageKey(result),
-        label: `${result.model_name || result.model_key || 'Model'} · ${result.compression_method || result.strategy}`,
+        label: `${straightLabel(result.model_name || result.model_key || 'Model')} - ${straightLabel(result.compression_method || result.strategy || 'Compression')}`,
         baselineCo2,
         compressedCo2,
         compressedTrainCo2,

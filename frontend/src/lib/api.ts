@@ -97,36 +97,125 @@ function toFiniteNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+function readPath(source: unknown, path: string): unknown {
+  const segments = path.split('.');
+  let current: unknown = source;
+
+  for (const segment of segments) {
+    if (!current || typeof current !== 'object') {
+      return undefined;
+    }
+
+    const record = current as Record<string, unknown>;
+    if (!(segment in record)) {
+      return undefined;
+    }
+
+    current = record[segment];
+  }
+
+  return current;
+}
+
+function firstFiniteNumber(source: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const rawValue = key.includes('.') ? readPath(source, key) : source[key];
+    const numeric = toFiniteNumber(rawValue);
+    if (numeric != null) {
+      return numeric;
+    }
+  }
+  return undefined;
+}
+
 export function normalizeDynamicResult(result: DynamicResult): DynamicResult {
-  const baselineSize =
-    toFiniteNumber(result.baseline_size_MB) ?? toFiniteNumber(result.original_size_MB);
-  const compressedSize =
-    toFiniteNumber(result.size_MB) ?? toFiniteNumber(result.compressed_size_MB);
+  const raw = result as unknown as Record<string, unknown>;
+
+  const baselineAccuracy = firstFiniteNumber(raw, [
+    'baseline_accuracy',
+    'baseline_accuracy_percent',
+    'comparison.full_dataset_metrics.baseline_accuracy_percent',
+    'observed_baseline_accuracy_percent',
+  ]);
+  const compressedAccuracy = firstFiniteNumber(raw, [
+    'compressed_accuracy',
+    'accuracy',
+    'accuracy_top1',
+    'top1_accuracy',
+    'comparison.full_dataset_metrics.compressed_accuracy_percent',
+    'observed_compressed_accuracy_percent',
+    'expected_compressed_accuracy_percent',
+  ]);
+
+  const baselineSize = firstFiniteNumber(raw, [
+    'baseline_size_MB',
+    'original_size_MB',
+    'size_MB_standard',
+    'comparison.full_dataset_metrics.baseline_size_MB',
+  ]);
+  const compressedSize = firstFiniteNumber(raw, [
+    'size_MB',
+    'compressed_size_MB',
+    'size_MB_quant',
+    'size_MB_sparse',
+    'size_MB_compressed',
+    'comparison.full_dataset_metrics.compressed_size_MB',
+  ]);
 
   const computedReduction =
     baselineSize != null && baselineSize > 0 && compressedSize != null
       ? ((baselineSize - compressedSize) / baselineSize) * 100
       : undefined;
 
-  const reduction =
-    toFiniteNumber(result.size_reduction_percent) ?? computedReduction ?? 0;
-
-  const safeBaselineSize = baselineSize ?? compressedSize ?? 0;
-  const safeCompressedSize = compressedSize ?? safeBaselineSize;
-
-  const immutableBaselineTrainingCo2 = toFiniteNumber(result.baseline_training_co2_kg);
-  const baselineTotalCo2 = immutableBaselineTrainingCo2 ?? toFiniteNumber(result.baseline_total_emissions_kg);
-  const fallbackCompressedCo2 =
-    toFiniteNumber(result.compressed_total_emissions_kg) ??
-    toFiniteNumber(result.co2_kg) ??
-    toFiniteNumber(result.emissions_kg);
-
-  const projectedCompressedCo2 =
-    baselineTotalCo2 != null && baselineTotalCo2 > 0 && safeBaselineSize > 0
-      ? baselineTotalCo2 * (safeCompressedSize / safeBaselineSize)
+  const compressionRatio = firstFiniteNumber(raw, ['compression_ratio', 'size_compression_ratio']);
+  const ratioReduction =
+    compressionRatio != null && compressionRatio > 0
+      ? (1 - 1 / compressionRatio) * 100
       : undefined;
 
-  const normalizedCompressedCo2 = projectedCompressedCo2 ?? fallbackCompressedCo2;
+  const reduction = firstFiniteNumber(raw, [
+    'size_reduction_percent',
+    'size_reduction',
+    'size_reduction_sparse_percent',
+    'size_reduction_quant_percent',
+    'comparison.full_dataset_metrics.size_reduction_percent',
+  ]) ?? computedReduction ?? ratioReduction;
+
+  const normalizedBaselineSize = baselineSize ?? compressedSize;
+  const normalizedCompressedSize = compressedSize ?? baselineSize;
+
+  const immutableBaselineTrainingCo2 = firstFiniteNumber(raw, [
+    'baseline_training_co2_kg',
+    'baseline_training_emissions_kg',
+    'baseline_co2_kg',
+  ]);
+  const baselineTotalCo2 = immutableBaselineTrainingCo2 ?? firstFiniteNumber(raw, [
+    'baseline_total_emissions_kg',
+    'baseline_total_co2_kg',
+    'comparison.full_dataset_metrics.baseline_co2_kg',
+  ]);
+  const fallbackCompressedCo2 = firstFiniteNumber(raw, [
+    'compressed_total_emissions_kg',
+    'compressed_co2_kg',
+    'co2_kg',
+    'emissions_kg',
+    'inference_co2_kg',
+    'inference_emissions_kg',
+    'training_co2_kg',
+    'training_emissions_kg',
+    'comparison.full_dataset_metrics.compressed_co2_kg',
+  ]);
+
+  const projectedCompressedCo2 =
+    baselineTotalCo2 != null &&
+    baselineTotalCo2 > 0 &&
+    normalizedBaselineSize != null &&
+    normalizedBaselineSize > 0 &&
+    normalizedCompressedSize != null
+      ? baselineTotalCo2 * (normalizedCompressedSize / normalizedBaselineSize)
+      : undefined;
+
+  const normalizedCompressedCo2 = fallbackCompressedCo2 ?? projectedCompressedCo2;
   const normalizedReduction =
     baselineTotalCo2 != null &&
     baselineTotalCo2 > 0 &&
@@ -134,22 +223,103 @@ export function normalizeDynamicResult(result: DynamicResult): DynamicResult {
       ? ((baselineTotalCo2 - normalizedCompressedCo2) / baselineTotalCo2) * 100
       : toFiniteNumber(result.emissions_reduction_percent);
 
+  const baselineTotalEnergy = firstFiniteNumber(raw, [
+    'baseline_total_energy_kwh',
+    'baseline_training_energy_kwh',
+    'comparison.full_dataset_metrics.baseline_energy_kwh',
+  ]);
+  const compressedTotalEnergy = firstFiniteNumber(raw, [
+    'compressed_total_energy_kwh',
+    'energy_kwh',
+    'inference_energy_kwh',
+    'training_energy_kwh',
+    'comparison.full_dataset_metrics.compressed_energy_kwh',
+  ]);
+  const trainingCo2 = firstFiniteNumber(raw, ['training_co2_kg', 'training_emissions_kg']);
+  const inferenceCo2 = firstFiniteNumber(raw, ['inference_co2_kg', 'inference_emissions_kg']);
+  const trainingEnergy = firstFiniteNumber(raw, ['training_energy_kwh']);
+  const inferenceEnergy = firstFiniteNumber(raw, ['inference_energy_kwh']);
+
+  const normalizedEnergyReduction =
+    baselineTotalEnergy != null &&
+    baselineTotalEnergy > 0 &&
+    compressedTotalEnergy != null
+      ? ((baselineTotalEnergy - compressedTotalEnergy) / baselineTotalEnergy) * 100
+      : toFiniteNumber(result.energy_reduction_percent);
+
+  const baselineLatency = firstFiniteNumber(raw, [
+    'baseline_latency_ms',
+    'comparison.full_dataset_metrics.baseline_latency_ms',
+  ]);
+  const compressedLatency = firstFiniteNumber(raw, [
+    'compressed_latency_ms',
+    'latency_ms',
+    'inference_latency_ms',
+    'comparison.full_dataset_metrics.compressed_latency_ms',
+  ]);
+  const normalizedLatencySpeedup =
+    firstFiniteNumber(raw, ['latency_speedup_percent']) ??
+    (baselineLatency != null && baselineLatency > 0 && compressedLatency != null
+      ? ((baselineLatency - compressedLatency) / baselineLatency) * 100
+      : undefined);
+
+  const normalizedBaselineAccuracy =
+    baselineAccuracy ?? toFiniteNumber(result.baseline_accuracy) ?? Number.NaN;
+  const normalizedCompressedAccuracy =
+    compressedAccuracy ?? toFiniteNumber(result.compressed_accuracy) ?? Number.NaN;
+  const normalizedBaselineSizeValue =
+    normalizedBaselineSize ?? toFiniteNumber(result.baseline_size_MB) ?? Number.NaN;
+  const normalizedCompressedSizeValue =
+    normalizedCompressedSize ?? toFiniteNumber(result.size_MB) ?? Number.NaN;
+
   return {
     ...result,
-    baseline_size_MB: safeBaselineSize,
-    size_MB: safeCompressedSize,
-    size_reduction_percent: Number(reduction.toFixed(2)),
+    baseline_accuracy: normalizedBaselineAccuracy,
+    compressed_accuracy: normalizedCompressedAccuracy,
+    baseline_size_MB: normalizedBaselineSizeValue,
+    original_size_MB: normalizedBaselineSize ?? result.original_size_MB,
+    size_MB: normalizedCompressedSizeValue,
+    compressed_size_MB: normalizedCompressedSize ?? result.compressed_size_MB,
+    size_reduction_percent:
+      reduction != null ? Number(reduction.toFixed(2)) : Number.NaN,
+    baseline_latency_ms: baselineLatency ?? result.baseline_latency_ms,
+    compressed_latency_ms: compressedLatency ?? result.compressed_latency_ms,
+    latency_ms: compressedLatency ?? result.latency_ms,
+    latency_speedup_percent:
+      normalizedLatencySpeedup != null
+        ? Number(normalizedLatencySpeedup.toFixed(2))
+        : result.latency_speedup_percent,
     baseline_training_co2_kg:
       immutableBaselineTrainingCo2 ?? result.baseline_training_co2_kg,
     baseline_total_emissions_kg: baselineTotalCo2 ?? result.baseline_total_emissions_kg,
+    training_co2_kg: trainingCo2 ?? result.training_co2_kg,
+    inference_co2_kg: inferenceCo2 ?? result.inference_co2_kg,
     compressed_total_emissions_kg:
       normalizedCompressedCo2 ?? result.compressed_total_emissions_kg,
-    co2_kg: normalizedCompressedCo2 ?? result.co2_kg,
-    emissions_kg: normalizedCompressedCo2 ?? result.emissions_kg,
+    co2_kg: normalizedCompressedCo2 ?? inferenceCo2 ?? trainingCo2 ?? result.co2_kg,
+    emissions_kg:
+      normalizedCompressedCo2 ??
+      inferenceCo2 ??
+      trainingCo2 ??
+      toFiniteNumber(result.emissions_kg) ??
+      Number.NaN,
+    baseline_total_energy_kwh: baselineTotalEnergy ?? result.baseline_total_energy_kwh,
+    compressed_total_energy_kwh: compressedTotalEnergy ?? result.compressed_total_energy_kwh,
+    training_energy_kwh: trainingEnergy ?? result.training_energy_kwh,
+    inference_energy_kwh: inferenceEnergy ?? result.inference_energy_kwh,
+    energy_kwh:
+      compressedTotalEnergy ??
+      inferenceEnergy ??
+      trainingEnergy ??
+      result.energy_kwh,
     emissions_reduction_percent:
       normalizedReduction != null
         ? Number(normalizedReduction.toFixed(2))
         : result.emissions_reduction_percent,
+    energy_reduction_percent:
+      normalizedEnergyReduction != null
+        ? Number(normalizedEnergyReduction.toFixed(2))
+        : result.energy_reduction_percent,
   };
 }
 
@@ -204,6 +374,7 @@ export interface DynamicResult {
   model_name?: string;
   model_key?: string;
   saved_at?: string;
+  source_result_file?: string;
   compression_method?: string;
   dataset?: string;
   input_size?: number;
@@ -405,6 +576,43 @@ export interface ModelComparisonCompressedOption {
   size_MB?: number | null;
   co2_kg?: number | null;
   artifact_name?: string;
+  saved_at?: string | null;
+  source_result_file?: string | null;
+  baseline_accuracy?: number | null;
+  compressed_accuracy?: number | null;
+  baseline_size_MB?: number | null;
+  compressed_size_MB?: number | null;
+  size_reduction_percent?: number | null;
+  latency_ms?: number | null;
+  latency_speedup_percent?: number | null;
+  baseline_total_emissions_kg?: number | null;
+  compressed_total_emissions_kg?: number | null;
+  training_co2_kg?: number | null;
+  inference_co2_kg?: number | null;
+  baseline_total_energy_kwh?: number | null;
+  compressed_total_energy_kwh?: number | null;
+  training_energy_kwh?: number | null;
+  inference_energy_kwh?: number | null;
+  energy_kwh?: number | null;
+  emissions_reduction_percent?: number | null;
+  energy_reduction_percent?: number | null;
+  co2_method?: string | null;
+  bottleneck_analysis?: string | null;
+  observed_baseline_accuracy_percent?: number | null;
+  observed_compressed_accuracy_percent?: number | null;
+  observed_baseline_latency_ms_per_image?: number | null;
+  observed_compressed_latency_ms_per_image?: number | null;
+  expected_compressed_accuracy_percent?: number | null;
+  compressed_accuracy_delta_percent?: number | null;
+  baseline_latency_ms?: number | null;
+  compressed_latency_ms?: number | null;
+  prediction_agreement_percent?: number | null;
+  sample_count?: number | null;
+  details_file?: string | null;
+  summary_generated_at?: string | null;
+  fallback_applied?: boolean;
+  effective_model_key?: string;
+  effective_strategy?: string;
 }
 
 export interface ModelComparisonOptionsResponse {

@@ -27,15 +27,16 @@ function toFiniteNumber(value: unknown): number | null {
 }
 
 function strategyBaselineCo2(strategy: Strategy, fallbackBaseline: number | null): number | null {
-  if (fallbackBaseline != null) {
-    return fallbackBaseline;
+  const ownBaseline = toFiniteNumber(strategy.baseline_co2_kg);
+  if (ownBaseline != null) {
+    return ownBaseline;
   }
-  return toFiniteNumber(strategy.baseline_co2_kg);
+  return fallbackBaseline;
 }
 
 function strategyCompressedCo2(strategy: Strategy): number | null {
   return toFiniteNumber(
-    strategy.compressed_co2_kg ?? strategy.co2_kg ?? strategy.inference_co2_kg
+    strategy.compressed_co2_kg ?? strategy.co2_kg ?? strategy.inference_co2_kg ?? strategy.training_co2_kg
   );
 }
 
@@ -49,6 +50,16 @@ function formatCo2Value(value: unknown): string {
   if (numeric == null) return 'Not Available';
   if (numeric > 0 && numeric < 0.000001) return '<0.000001 kg';
   return `${numeric.toFixed(6)} kg`;
+}
+
+function straightLabel(raw: string, maxLen: number): string {
+  const cleaned = raw
+    .replace(/\s*·\s*/g, ' - ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (cleaned.length <= maxLen) return cleaned;
+  return `${cleaned.slice(0, Math.max(1, maxLen - 1))}…`;
 }
 
 export function CompressionChart({ strategies, modelName }: ChartProps) {
@@ -85,7 +96,8 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
     : 'Compression Analysis';
 
   const sizeData = strategies.map(s => ({
-    name: s.name.replace(/[→·]/g, '').substring(0, 20),
+    name: straightLabel(s.name, 30),
+    fullName: straightLabel(s.name, 120),
     'Size (MB)': s.size_MB,
     'Reduction (%)': s.size_reduction,
   }));
@@ -103,7 +115,8 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
     const reduction = reductionPercent(baselineValue, compressedValue);
 
     return {
-      name: s.name.replace(/[→·]/g, '').substring(0, 24),
+      name: straightLabel(s.name, 30),
+      fullName: straightLabel(s.name, 120),
       'Baseline CO₂ (kg)': baselineValue,
       'Compressed CO₂ (kg)': compressedValue,
       'CO₂ Reduction (%)': reduction,
@@ -143,7 +156,8 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
     .map(s => {
       const bAcc = baseline?.accuracy || 1;
       return {
-        name: s.name.replace(/[→·]/g, '').substring(0, 18),
+        name: straightLabel(s.name, 24),
+        fullName: straightLabel(s.name, 120),
         Accuracy: Math.round((s.accuracy / bAcc) * 100),
         'Size Reduction': Math.round(s.size_reduction),
       };
@@ -200,9 +214,17 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
             {view === 'size' ? (
               <BarChart data={sizeData} margin={{ top: 5, right: 20, left: 0, bottom: 60 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(66, 73, 62, 0.2)" />
-                <XAxis dataKey="name" tick={{ fontSize: 10, fill: '#c2c9bb' }} angle={-35} textAnchor="end" />
+                <XAxis
+                  dataKey="name"
+                  tick={{ fontSize: 10, fill: '#c2c9bb' }}
+                  angle={0}
+                  textAnchor="middle"
+                  interval={0}
+                  height={56}
+                />
                 <YAxis tick={{ fontSize: 11, fill: '#c2c9bb' }} />
                 <Tooltip
+                  labelFormatter={(_, payload) => payload?.[0]?.payload?.fullName || ''}
                   contentStyle={{ backgroundColor: '#1e201d', border: '1px solid rgba(66, 73, 62, 0.3)', borderRadius: '0.75rem', color: '#e3e3de' }}
                   itemStyle={{ color: '#e3e3de' }}
                 />
@@ -212,12 +234,20 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
             ) : view === 'carbon' ? (
               <BarChart data={carbonData} margin={{ top: 5, right: 20, left: 10, bottom: 60 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(66, 73, 62, 0.2)" />
-                <XAxis dataKey="name" tick={{ fontSize: 10, fill: '#c2c9bb' }} angle={-35} textAnchor="end" />
+                <XAxis
+                  dataKey="name"
+                  tick={{ fontSize: 10, fill: '#c2c9bb' }}
+                  angle={0}
+                  textAnchor="middle"
+                  interval={0}
+                  height={56}
+                />
                 <YAxis
                   tick={{ fontSize: 11, fill: '#c2c9bb' }}
                   label={{ value: 'CO₂ emissions (kg)', angle: -90, position: 'insideLeft', fill: '#c2c9bb' }}
                 />
                 <Tooltip
+                  labelFormatter={(_, payload) => payload?.[0]?.payload?.fullName || ''}
                   formatter={(value, name) => [formatCo2Value(value), name]}
                   contentStyle={{ backgroundColor: '#1e201d', border: '1px solid rgba(66, 73, 62, 0.3)', borderRadius: '0.75rem', color: '#e3e3de' }}
                   itemStyle={{ color: '#e3e3de' }}

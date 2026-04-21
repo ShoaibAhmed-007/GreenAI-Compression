@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import {
   DashboardData, DynamicResult, BaselinesResponse, Strategy,
-  fetchAPI, getBaselines, clearSavedResults, loadSavedResults,
+  fetchAPI, getBaselines, getCompressionHistory, clearSavedResults, loadSavedResults,
   saveResult, deleteSavedResultByKey, getResultStorageKey,
   dynamicResultToStrategy,
 } from '@/lib/api';
@@ -16,6 +16,63 @@ import { ModelSelector } from '@/components/ModelSelector';
 import { CompressionDialog } from '@/components/CompressionDialog';
 import { PreparePanel } from '@/components/PreparePanel';
 import { DefenseStrategyPanel } from '@/components/DefenseStrategyPanel';
+
+function isDirectSourceResult(result: DynamicResult): boolean {
+  return typeof result.source_result_file === 'string' && result.source_result_file.trim() !== '';
+}
+
+function resultQualityScore(result: DynamicResult): number {
+  let score = 0;
+  if (typeof result.compressed_accuracy === 'number' && Number.isFinite(result.compressed_accuracy)) score += 2;
+  if (typeof result.size_MB === 'number' && Number.isFinite(result.size_MB)) score += 2;
+  if (typeof result.compressed_total_emissions_kg === 'number' && Number.isFinite(result.compressed_total_emissions_kg)) score += 2;
+  if (typeof result.compressed_total_energy_kwh === 'number' && Number.isFinite(result.compressed_total_energy_kwh)) score += 1;
+  if (typeof result.latency_ms === 'number' && Number.isFinite(result.latency_ms)) score += 1;
+  return score;
+}
+
+function pickPreferredResult(existing: DynamicResult, incoming: DynamicResult): DynamicResult {
+  const existingDirect = isDirectSourceResult(existing);
+  const incomingDirect = isDirectSourceResult(incoming);
+  if (incomingDirect && !existingDirect) return incoming;
+  if (!incomingDirect && existingDirect) return existing;
+
+  const existingTs = Date.parse(existing.saved_at || '');
+  const incomingTs = Date.parse(incoming.saved_at || '');
+
+  if (Number.isFinite(incomingTs) && !Number.isFinite(existingTs)) return incoming;
+  if (!Number.isFinite(incomingTs) && Number.isFinite(existingTs)) return existing;
+  if (Number.isFinite(incomingTs) && Number.isFinite(existingTs)) {
+    return incomingTs >= existingTs ? incoming : existing;
+  }
+
+  return resultQualityScore(incoming) >= resultQualityScore(existing) ? incoming : existing;
+}
+
+function flattenHistoryResults(history: Record<string, DynamicResult[]>): DynamicResult[] {
+  const byKey = new Map<string, DynamicResult>();
+
+  for (const [modelKey, entries] of Object.entries(history || {})) {
+    if (!Array.isArray(entries)) continue;
+
+    for (const entry of entries) {
+      const normalizedEntry: DynamicResult = {
+        ...entry,
+        model_key: entry.model_key || modelKey,
+      };
+
+      const storageKey = getResultStorageKey(normalizedEntry);
+      const existing = byKey.get(storageKey);
+      if (!existing) {
+        byKey.set(storageKey, normalizedEntry);
+      } else {
+        byKey.set(storageKey, pickPreferredResult(existing, normalizedEntry));
+      }
+    }
+  }
+
+  return Array.from(byKey.values());
+}
 
 export default function Home() {
   const [data, setData] = useState<DashboardData | null>(null);
@@ -40,7 +97,7 @@ export default function Home() {
         ? baselineModel.training_co2_kg
         : undefined;
 
-    if (immutableBaselineCo2 == null) {
+    if (strategy.baseline_co2_kg != null || immutableBaselineCo2 == null) {
       return strategy;
     }
 
@@ -54,9 +111,10 @@ export default function Home() {
     try {
       setLoading(true);
       console.log('[Dashboard] loading latest dashboard and baselines');
-      const [dashboardResult, baselinesResult] = await Promise.allSettled([
+      const [dashboardResult, baselinesResult, historyResult] = await Promise.allSettled([
         fetchAPI('/api/dashboard'),
         getBaselines(),
+        getCompressionHistory(),
       ]);
 
       if (dashboardResult.status !== 'fulfilled') {
@@ -68,6 +126,14 @@ export default function Home() {
 
       setData(dashboard);
       if (baselineData) setBaselines(baselineData);
+
+      // Read compression results from backend history (source-of-truth: results/*_compression_result.json).
+      if (historyResult.status === 'fulfilled') {
+        const canonicalResults = flattenHistoryResults(historyResult.value.history || {});
+        setSavedResults(canonicalResults);
+      } else {
+        setSavedResults(loadSavedResults());
+      }
 
       setError(null);
     } catch (err: any) {
