@@ -378,7 +378,7 @@ export default function Home() {
         />
       )}
 
-      {/* Model Grid + Analysis Sidebar */}
+      {/* Model Grid + Right Sidebar */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
         {/* Model Library Grid (2/3 width) */}
         <div className="xl:col-span-2 space-y-6">
@@ -393,6 +393,12 @@ export default function Home() {
               compressionCounts={compressionCounts}
             />
           )}
+
+          {/* Strategy Comparison - same width as model library */}
+          <ComparisonTable
+            strategies={allStrategies}
+            onDeleteStrategy={handleDeleteResult}
+          />
 
           {/* Inline Expanded Model Details */}
           {selectedModel && baselines?.models[selectedModel] && (
@@ -415,21 +421,16 @@ export default function Home() {
             baselines={baselines?.models || {}}
             onDeleteResult={handleDeleteResult}
           />
-
-          {/* Compression Analysis + Strategy Comparison */}
-          <CompressionChart
-            strategies={chartStrategies}
-            modelName={selectedModel && baselines?.models[selectedModel]
-              ? baselines.models[selectedModel].model_name
-              : undefined}
-          />
-
-          <ComparisonTable
-            strategies={allStrategies}
-            onDeleteStrategy={handleDeleteResult}
-          />
         </div>
       </div>
+
+      {/* Full-width Compression Analysis */}
+      <CompressionChart
+        strategies={chartStrategies}
+        modelName={selectedModel && baselines?.models[selectedModel]
+          ? baselines.models[selectedModel].model_name
+          : undefined}
+      />
     </div>
   );
 }

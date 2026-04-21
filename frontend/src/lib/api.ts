@@ -184,15 +184,18 @@ export function normalizeDynamicResult(result: DynamicResult): DynamicResult {
   const normalizedBaselineSize = baselineSize ?? compressedSize;
   const normalizedCompressedSize = compressedSize ?? baselineSize;
 
-  const immutableBaselineTrainingCo2 = firstFiniteNumber(raw, [
+  const baselineTotalCo2 = firstFiniteNumber(raw, [
+    'baseline_total_emissions_kg',
+    'baseline_total_co2_kg',
+    'comparison.full_dataset_metrics.baseline_co2_kg',
     'baseline_training_co2_kg',
     'baseline_training_emissions_kg',
     'baseline_co2_kg',
   ]);
-  const baselineTotalCo2 = immutableBaselineTrainingCo2 ?? firstFiniteNumber(raw, [
-    'baseline_total_emissions_kg',
-    'baseline_total_co2_kg',
-    'comparison.full_dataset_metrics.baseline_co2_kg',
+  const immutableBaselineTrainingCo2 = firstFiniteNumber(raw, [
+    'baseline_training_co2_kg',
+    'baseline_training_emissions_kg',
+    'baseline_co2_kg',
   ]);
   const fallbackCompressedCo2 = firstFiniteNumber(raw, [
     'compressed_total_emissions_kg',
@@ -1125,7 +1128,7 @@ export function dynamicResultToStrategy(r: DynamicResult): Strategy {
   if (!methodLabel) {
     methodLabel = formatStrategyToken(normalized.compression_method || normalized.strategy || 'compression');
   }
-  const baselineTotalCo2 = normalized.baseline_training_co2_kg ?? normalized.baseline_total_emissions_kg;
+  const baselineTotalCo2 = normalized.baseline_total_emissions_kg ?? normalized.baseline_training_co2_kg;
   const compressedTotalCo2 = normalized.compressed_total_emissions_kg;
   const trainingCo2 = normalized.training_co2_kg ?? normalized.training_emissions_kg;
   const totalCo2 = compressedTotalCo2;

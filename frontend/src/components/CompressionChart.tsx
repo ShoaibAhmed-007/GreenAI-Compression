@@ -70,7 +70,7 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
 
     const baseline = strategies.find(s => s.key === 'baseline');
     const baselineCo2 = baseline
-      ? toFiniteNumber(baseline.training_co2_kg ?? baseline.baseline_co2_kg ?? baseline.co2_kg)
+      ? toFiniteNumber(baseline.baseline_co2_kg ?? baseline.co2_kg ?? baseline.training_co2_kg)
       : null;
     
     const compressedOnly = strategies.filter(s => s.key !== 'baseline');
@@ -104,7 +104,7 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
 
   const baseline = strategies.find(s => s.key === 'baseline');
   const baselineCo2 = baseline
-    ? toFiniteNumber(baseline.training_co2_kg ?? baseline.baseline_co2_kg ?? baseline.co2_kg)
+    ? toFiniteNumber(baseline.baseline_co2_kg ?? baseline.co2_kg ?? baseline.training_co2_kg)
     : null;
   const compressedOnly = strategies.filter(s => s.key !== 'baseline');
   const carbonRows = compressedOnly.length > 0 ? compressedOnly : strategies;
@@ -199,7 +199,7 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
         </div>
       </div>
 
-      <div className="h-72">
+      <div className="h-[30rem]">
         {view === 'carbon' && !hasCarbonValues ? (
           <div className="h-full flex items-center justify-center text-center bg-surface-container-low rounded-xl">
             <div>
@@ -216,11 +216,11 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(66, 73, 62, 0.2)" />
                 <XAxis
                   dataKey="name"
-                  tick={{ fontSize: 10, fill: '#c2c9bb' }}
+                  tick={false}
                   angle={0}
                   textAnchor="middle"
                   interval={0}
-                  height={56}
+                  height={20}
                 />
                 <YAxis tick={{ fontSize: 11, fill: '#c2c9bb' }} />
                 <Tooltip
@@ -236,11 +236,11 @@ export function CompressionChart({ strategies, modelName }: ChartProps) {
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(66, 73, 62, 0.2)" />
                 <XAxis
                   dataKey="name"
-                  tick={{ fontSize: 10, fill: '#c2c9bb' }}
+                  tick={false}
                   angle={0}
                   textAnchor="middle"
                   interval={0}
-                  height={56}
+                  height={20}
                 />
                 <YAxis
                   tick={{ fontSize: 11, fill: '#c2c9bb' }}

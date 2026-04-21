@@ -106,6 +106,9 @@ export function EnergySection({
     });
 
   const hasComparisons = comparisonRows.length > 0;
+  const comparisonListClass = comparisonRows.length > 2
+    ? 'space-y-3 max-h-[30rem] overflow-y-auto pr-1'
+    : 'space-y-3';
   const showSection = hasSavings || hasComparisons;
 
   return (
@@ -137,79 +140,81 @@ export function EnergySection({
               <p className="text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
                 Baseline vs Compressed CO2
               </p>
-              {comparisonRows.map((row) => {
-                const reductionText =
-                  row.reductionPercent == null
-                    ? 'Not Available'
-                    : `${row.reductionPercent.toFixed(2)}%`;
+              <div className={comparisonListClass}>
+                {comparisonRows.map((row) => {
+                  const reductionText =
+                    row.reductionPercent == null
+                      ? 'Not Available'
+                      : `${row.reductionPercent.toFixed(2)}%`;
 
-                const reductionTone =
-                  row.reductionPercent == null
-                    ? 'text-on-surface-variant'
-                    : row.reductionPercent > 0
-                      ? 'text-primary'
-                      : row.reductionPercent < 0
-                        ? 'text-error'
-                        : 'text-on-surface-variant';
+                  const reductionTone =
+                    row.reductionPercent == null
+                      ? 'text-on-surface-variant'
+                      : row.reductionPercent > 0
+                        ? 'text-primary'
+                        : row.reductionPercent < 0
+                          ? 'text-error'
+                          : 'text-on-surface-variant';
 
-                return (
-                  <div key={row.key} className="bg-surface-container-low rounded-xl p-4 space-y-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <p className="text-sm font-medium text-on-surface">{row.label}</p>
-                      <div className="flex items-start gap-2">
-                        <div className="text-right">
-                          <p className={`text-lg font-bold font-technical ${reductionTone}`}>{reductionText}</p>
-                          <p className="text-xs text-on-surface-variant/50">CO2 reduction</p>
+                  return (
+                    <div key={row.key} className="bg-surface-container-low rounded-xl p-4 space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <p className="text-sm font-medium text-on-surface">{row.label}</p>
+                        <div className="flex items-start gap-2">
+                          <div className="text-right">
+                            <p className={`text-lg font-bold font-technical ${reductionTone}`}>{reductionText}</p>
+                            <p className="text-xs text-on-surface-variant/50">CO2 reduction</p>
+                          </div>
+                          {onDeleteResult && (
+                            <button
+                              type="button"
+                              onClick={() => onDeleteResult(row.key)}
+                              className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-error-container/10 text-error hover:bg-error-container/20 transition-colors"
+                              title="Delete this saved result"
+                              aria-label="Delete this saved result"
+                            >
+                              <span className="material-symbols-outlined text-sm">close</span>
+                            </button>
+                          )}
                         </div>
-                        {onDeleteResult && (
-                          <button
-                            type="button"
-                            onClick={() => onDeleteResult(row.key)}
-                            className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-error-container/10 text-error hover:bg-error-container/20 transition-colors"
-                            title="Delete this saved result"
-                            aria-label="Delete this saved result"
-                          >
-                            <span className="material-symbols-outlined text-sm">close</span>
-                          </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div className="bg-surface-container-lowest rounded-xl p-3" style={{ borderLeft: '4px solid #ffb4ab' }}>
+                          <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Baseline CO2</p>
+                          <p className="text-sm font-technical text-on-surface mt-1">{formatCo2(row.baselineCo2)}</p>
+                        </div>
+
+                        <div className="bg-surface-container-lowest rounded-xl p-3" style={{ borderLeft: '4px solid #5bdda8' }}>
+                          <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Compressed CO2</p>
+                          <p className="text-sm font-technical text-primary mt-1">{formatCo2(row.compressedCo2)}</p>
+                        </div>
+
+                        <div className="bg-surface-container-lowest rounded-xl p-3">
+                          <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Train / Infer</p>
+                          <p className="text-sm font-technical text-on-surface mt-1">
+                            {`${formatCo2(row.compressedTrainCo2)} / ${formatCo2(row.compressedInferCo2)}`}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className="text-[10px] text-on-surface-variant/50">
+                          Fair comparison prefers total benchmark CO2 when available; otherwise it falls back to train/infer fields.
+                        </p>
+                        {row.suspiciousReduction && (
+                          <div className="flex items-start gap-2 mt-2 bg-error-container/10 p-2.5 rounded-lg">
+                            <span className="material-symbols-outlined text-error text-sm">warning</span>
+                            <p className="text-[10px] text-on-error-container">
+                              Warning: very high CO2 reduction with small size reduction. Re-check tracking workload parity.
+                            </p>
+                          </div>
                         )}
                       </div>
                     </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <div className="bg-surface-container-lowest rounded-xl p-3" style={{ borderLeft: '4px solid #ffb4ab' }}>
-                        <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Baseline CO2</p>
-                        <p className="text-sm font-technical text-on-surface mt-1">{formatCo2(row.baselineCo2)}</p>
-                      </div>
-
-                      <div className="bg-surface-container-lowest rounded-xl p-3" style={{ borderLeft: '4px solid #5bdda8' }}>
-                        <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Compressed CO2</p>
-                        <p className="text-sm font-technical text-primary mt-1">{formatCo2(row.compressedCo2)}</p>
-                      </div>
-
-                      <div className="bg-surface-container-lowest rounded-xl p-3">
-                        <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Train / Infer</p>
-                        <p className="text-sm font-technical text-on-surface mt-1">
-                          {`${formatCo2(row.compressedTrainCo2)} / ${formatCo2(row.compressedInferCo2)}`}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div>
-                      <p className="text-[10px] text-on-surface-variant/50">
-                        Fair comparison prefers total benchmark CO2 when available; otherwise it falls back to train/infer fields.
-                      </p>
-                      {row.suspiciousReduction && (
-                        <div className="flex items-start gap-2 mt-2 bg-error-container/10 p-2.5 rounded-lg">
-                          <span className="material-symbols-outlined text-error text-sm">warning</span>
-                          <p className="text-[10px] text-on-error-container">
-                            Warning: very high CO2 reduction with small size reduction. Re-check tracking workload parity.
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </>
           )}
 
