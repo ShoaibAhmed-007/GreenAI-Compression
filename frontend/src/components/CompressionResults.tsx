@@ -115,6 +115,29 @@ function formatStrategyToken(value: string): string {
     .join(' ');
 }
 
+function sanitizeFilenameToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '_')
+    .replace(/-/g, '_')
+    .replace(/[^a-z0-9_]/g, '') || 'unknown';
+}
+
+function buildExportFilename(result: DynamicResult): string {
+  const modelToken = sanitizeFilenameToken(result.model_key || result.model_name || 'model');
+  const strategyToken = sanitizeFilenameToken(result.strategy || result.compression_method || 'compression');
+
+  const savedAtMs = Date.parse(result.saved_at || '');
+  const timestamp = Number.isFinite(savedAtMs)
+    ? new Date(savedAtMs).toISOString().replace(/[:.]/g, '-')
+    : null;
+
+  return timestamp
+    ? `${modelToken}_${strategyToken}_compression_result_${timestamp}.json`
+    : `${modelToken}_${strategyToken}_compression_result.json`;
+}
+
 function strategyLabel(result: DynamicResult | null): string {
   if (!result) return 'Not Available';
   const raw = String(
@@ -247,11 +270,46 @@ export function CompressionResults({ result }: CompressionResultsProps) {
   const resolvedTechnique = result.resolved_technique ? formatStrategyToken(result.resolved_technique) : null;
   const userIntentLayer = result.user_intent_layer || null;
 
+  const handleExportResult = () => {
+    if (typeof window === 'undefined') return;
+
+    try {
+      const content = JSON.stringify(result, null, 2);
+      const blob = new Blob([content], { type: 'application/json' });
+      const url = window.URL.createObjectURL(blob);
+
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = buildExportFilename(result);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to export compression result JSON:', error);
+    }
+  };
+
   return (
     <div className="space-y-3">
       <div className="bg-surface-container-low rounded-xl p-4">
-        <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Applied Compression Technique</p>
-        <p className="text-base font-semibold text-on-surface mt-1">{strategyLabel(result)}</p>
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-wider text-on-surface-variant font-technical">Applied Compression Technique</p>
+            <p className="text-base font-semibold text-on-surface mt-1">{strategyLabel(result)}</p>
+          </div>
+          <button
+            type="button"
+            onClick={handleExportResult}
+            className="btn-secondary w-full sm:w-auto"
+            title="Download this compression result as JSON"
+            aria-label="Download this compression result as JSON"
+          >
+            <span className="material-symbols-outlined text-base">download</span>
+            Export JSON
+          </button>
+        </div>
         {smartRoute && (
           <p className="text-xs text-on-surface-variant mt-1">
             Router selected: <span className="font-semibold text-primary">{formatStrategyToken(String(smartRoute))}</span>
